@@ -1,6 +1,6 @@
 # OTel Log Receiver
 
-This is a simple C++ application that runs an HTTP server to receive OpenTelemetry (OTel) logs and print them to standard output.
+This is a C++ application that runs an HTTP server to receive OpenTelemetry (OTel) logs from an OpenTelemetry logs agent and writes the logs data to an Iceberg table.
 
 The HTTP server listens on port `4318`, which is the default port for OTLP/HTTP.
 
@@ -81,3 +81,34 @@ curl -X POST -H "Content-Type: application/json" -d '{
 ```
 
 When the server receives the log, it will print the JSON payload to the console where `otel_receiver` is running.
+
+## Running Tests
+
+The project includes unit tests using Google Test (gtest). To build and run the test suite:
+
+1. **Build the test executable:**
+   ```bash
+   cd build
+   make http_server_test
+   ```
+
+   Or if using ninja:
+   ```bash
+   cd build
+   ninja http_server_test
+   ```
+
+2. **Run the tests:**
+   ```bash
+   ./http_server_test
+   ```
+
+   Or use CTest:
+   ```bash
+   ctest -R HttpServerTest
+   ```
+
+The test suite covers the `/v1/logs` endpoint implementation, including:
+- Handling of protobuf and JSON content types
+- Gzip-encoded request decompression
+- Error handling for invalid payloads and unsupported content types
