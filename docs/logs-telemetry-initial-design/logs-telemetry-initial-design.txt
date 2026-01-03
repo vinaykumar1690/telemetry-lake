@@ -1,0 +1,28 @@
+https://gemini.google.com/share/5615ef3189d2
+
+I am building a c++ application called telemetry-lake. The goal is to be able to ingest telemetry data from an otel agent and write it to iceberg tables. I want to start with logs data. I already have a github repo with a basic /v1/logs endpoint here - https://github.com/vinaykumar1690/telemetry-lake
+
+Check the code in the repo and see if there are any issues or room for improvement.
+
+I want to architect the logs pipeline to have the following characteristics.
+
+1. Low latency receive endpoints.
+2. No loss of data after the receiver sends a 200 OK to the agent.
+3. Create an iceberg table that can store the logs data received without losing any information.
+4. Buffer the contents of the recieved log data locally before committing data to the iceberg table to prevent small file problem.
+5. Make the ingester horizontally scalable so that the throughput of data ingested from the agents can increase linearly
+6. horizontally scale the iceberg table appender
+
+I am thinking we can use a distributed persistent queue like kafka as a write ahead log where the ingester (http endpoint) can quickly write the raw data.
+We can then read from the queue and start creating the table data that can be appended to the iceberg table. We can use something like duckdb to actually create
+the table data file and commit to the iceberg table. The table data appender process should have a size bound or a time bound which ever comes first.
+
+The data appender process should create an iceberg table first with the required schema to store logs data. At the very minimum, we should have timestamp (type timestamp), message (type string) and attributes (type key-value) columns. Tell me which is better.
+1. Keep all attributes like service_name, pod_name etc in one column with key-value type, OR
+2. Have a separate column per attribute, OR
+3. Hybrid approach, where the well known low cardinality columns have a separate columns and other attributes go into a key value store.
+
+Is there an alternative to using a persistent queue like kafka to achieve the above requirements?
+Is there an alternative to using duckdb as the iceberg table appender?
+
+Provide brief justifications for the decisions made. Come up with a design doc (markdown) for the above system. Keep the doc brief and explain the tradeoffs. Also make sure the design doc covers low level implementation details in c++.

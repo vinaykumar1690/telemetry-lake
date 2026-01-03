@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "http_server.hpp"
+#include "ingester/http_server.hpp"
 #include "crow.h"
 #include <zlib.h>
 #include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"

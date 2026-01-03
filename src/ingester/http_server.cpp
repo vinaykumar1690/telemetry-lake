@@ -1,4 +1,5 @@
 #include "http_server.hpp"
+#include "queue_producer.hpp"
 #include "crow.h"
 #include <iostream>
 #include <algorithm>
@@ -39,12 +40,10 @@ static bool decompressGzip(const std::string &in, std::string &out) {
     return true;
 }
 
-static void handle_logs(const ExportLogsServiceRequest &req) {
-    std::cout << "Received ExportLogsServiceRequest with resource_logs="
-              << req.resource_logs_size() << std::endl;
-}
+HttpServer::HttpServer() : queue_producer_(nullptr) {}
 
-HttpServer::HttpServer() {}
+HttpServer::HttpServer(std::shared_ptr<QueueProducer> queue_producer)
+    : queue_producer_(queue_producer) {}
 
 static inline std::string to_lower_trimmed(const std::string &s) {
     std::string out;
@@ -58,9 +57,10 @@ static inline std::string to_lower_trimmed(const std::string &s) {
 }
 
 void HttpServer::setupRoutes(crow::SimpleApp& app) {
+    auto queue_producer = queue_producer_;  // Capture for lambda
     CROW_ROUTE(app, "/v1/logs")
         .methods("POST"_method)
-        ([](const crow::request& req){
+        ([queue_producer](const crow::request& req){
             ExportLogsServiceRequest logs_request;
 
             std::string content_type = req.get_header_value("Content-Type");
@@ -92,7 +92,27 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
                 return crow::response(415, "Unsupported Media Type");
             }
 
-            handle_logs(logs_request);
+            // Produce to queue if available
+            if (queue_producer) {
+                // Check backpressure before attempting to produce
+                if (queue_producer->isAtCapacity()) {
+                    return crow::response(429, "Too Many Requests: Queue is at capacity");
+                }
+                
+                ProduceResult result = queue_producer->produce(logs_request);
+                
+                if (result == ProduceResult::QUEUE_FULL) {
+                    return crow::response(503, "Service Unavailable: Queue is full");
+                } else if (result == ProduceResult::PERSISTENT_ERROR) {
+                    return crow::response(500, "Internal Server Error: Failed to queue message");
+                } else if (result != ProduceResult::SUCCESS) {
+                    return crow::response(503, "Service Unavailable: Queue error");
+                }
+            } else {
+                // Fallback: just log (for testing without queue)
+                std::cout << "Received ExportLogsServiceRequest with resource_logs="
+                          << logs_request.resource_logs_size() << std::endl;
+            }
 
             ExportLogsServiceResponse resp_msg;
             std::string resp_body;
@@ -112,3 +132,4 @@ void HttpServer::start(const std::string& host, int port) {
     std::cout << "OTel Log Receiver is running at http://" << host << ":" << port << std::endl;
     app.bindaddr(host).port(port).multithreaded().run();
 }
+

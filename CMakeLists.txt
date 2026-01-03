@@ -57,8 +57,60 @@ FetchContent_Declare(
   GIT_TAG v1.14.0
 )
 
+# Find librdkafka for Kafka/Redpanda client (required)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(RDKAFKA rdkafka)
+endif()
+
+if(NOT RDKAFKA_FOUND)
+  # Try to find librdkafka via find_library
+  find_library(RDKAFKA_LIBRARY
+    NAMES rdkafka
+    PATHS
+      /usr/lib
+      /usr/local/lib
+      /opt/homebrew/lib
+    REQUIRED
+  )
+  
+  find_path(RDKAFKA_INCLUDE_DIR
+    NAMES librdkafka/rdkafka.h
+    PATHS
+      /usr/include
+      /usr/local/include
+      /opt/homebrew/include
+    REQUIRED
+  )
+  
+  if(RDKAFKA_LIBRARY AND RDKAFKA_INCLUDE_DIR)
+    add_library(rdkafka::rdkafka UNKNOWN IMPORTED)
+    set_target_properties(rdkafka::rdkafka PROPERTIES
+      IMPORTED_LOCATION "${RDKAFKA_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${RDKAFKA_INCLUDE_DIR}"
+    )
+    set(RDKAFKA_FOUND TRUE)
+  endif()
+endif()
+
+# Fail if librdkafka is not found
+if(NOT RDKAFKA_FOUND)
+  message(FATAL_ERROR "librdkafka is required but not found. Please install it via: brew install librdkafka (macOS) or apt-get install librdkafka-dev (Linux)")
+endif()
+
+# Fetch DuckDB
+FetchContent_Declare(
+  duckdb
+  GIT_REPOSITORY https://github.com/duckdb/duckdb.git
+  GIT_TAG v1.0.0
+)
+
 # Make dependencies available
-FetchContent_MakeAvailable(Crow protobuf opentelemetry_proto googletest)
+FetchContent_MakeAvailable(Crow protobuf opentelemetry_proto googletest duckdb)
+
+# Configure DuckDB
+set(DUCKDB_BUILD_EXTENSIONS ON CACHE BOOL "" FORCE)
+set(DUCKDB_EXTENSION_DIRECTORIES "${duckdb_SOURCE_DIR}/extensions" CACHE STRING "" FORCE)
 
 # Set up OpenTelemetry protobuf compilation
 set(OPENTELEMETRY_PROTO_ROOT ${opentelemetry_proto_SOURCE_DIR})
@@ -144,7 +196,7 @@ target_include_directories(otel_proto PUBLIC
 )
 
 # Create executable
-add_executable(otel_receiver src/main.cpp src/http_server.cpp)
+add_executable(otel_receiver src/main.cpp src/ingester/http_server.cpp src/config.cpp src/ingester/queue_producer.cpp)
 
 # Link libraries
 target_link_libraries(otel_receiver PUBLIC 
@@ -154,14 +206,19 @@ target_link_libraries(otel_receiver PUBLIC
   ZLIB::ZLIB
 )
 
+# Link librdkafka (required)
+target_link_libraries(otel_receiver PUBLIC rdkafka::rdkafka)
+
 # Include directories for protobuf JSON utilities
 target_include_directories(otel_receiver PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/ingester
   ${protobuf_SOURCE_DIR}/src
 )
 
 # Create test executable
 enable_testing()
-add_executable(http_server_test tests/test_http_server.cpp src/http_server.cpp)
+add_executable(http_server_test tests/test_http_server.cpp src/ingester/http_server.cpp)
 
 # Link libraries for test
 target_link_libraries(http_server_test PRIVATE
@@ -177,9 +234,59 @@ target_link_libraries(http_server_test PRIVATE
 # Include directories for test
 target_include_directories(http_server_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/ingester
   ${protobuf_SOURCE_DIR}/src
 )
 
 # Add test to CTest
 add_test(NAME HttpServerTest COMMAND http_server_test)
+
+# Create buffer manager test
+add_executable(buffer_manager_test tests/test_buffer_manager.cpp src/appender/buffer_manager.cpp)
+target_link_libraries(buffer_manager_test PRIVATE GTest::gtest GTest::gtest_main)
+target_include_directories(buffer_manager_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME BufferManagerTest COMMAND buffer_manager_test)
+
+# Create log transformer test
+add_executable(log_transformer_test 
+  tests/test_log_transformer.cpp 
+  src/appender/log_transformer.cpp
+)
+target_link_libraries(log_transformer_test PRIVATE 
+  GTest::gtest 
+  GTest::gtest_main 
+  protobuf::libprotobuf
+  otel_proto
+)
+target_include_directories(log_transformer_test PRIVATE 
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${protobuf_SOURCE_DIR}/src
+)
+add_test(NAME LogTransformerTest COMMAND log_transformer_test)
+
+# Create appender executable
+add_executable(otel_appender 
+  src/appender/main.cpp
+  src/appender/queue_consumer.cpp
+  src/appender/log_transformer.cpp
+  src/appender/iceberg_appender.cpp
+  src/appender/buffer_manager.cpp
+  src/appender/dead_letter_queue.cpp
+  src/config.cpp
+)
+
+# Link libraries for appender
+target_link_libraries(otel_appender PRIVATE
+  protobuf::libprotobuf
+  otel_proto
+)
+
+# Link librdkafka (required)
+target_link_libraries(otel_appender PRIVATE rdkafka::rdkafka)
+
+# Include directories for appender
+target_include_directories(otel_appender PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${protobuf_SOURCE_DIR}/src
+)
 
