@@ -163,17 +163,13 @@ std::chrono::system_clock::time_point LogTransformer::nanosToTimePoint(uint64_t 
         return std::chrono::system_clock::now();
     }
     
-    // Convert nanoseconds to seconds
-    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+    // Convert nanoseconds to system_clock::duration (which may be microseconds on some platforms)
+    auto duration = std::chrono::duration_cast<std::chrono::system_clock::duration>(
         std::chrono::nanoseconds(nanos));
-    auto nanos_remainder = nanos % 1000000000ULL;
     
-    // Create time_point from seconds since epoch
+    // Create time_point from duration since epoch
     std::chrono::system_clock::time_point tp = 
-        std::chrono::system_clock::time_point(seconds);
-    
-    // Add remaining nanoseconds
-    tp += std::chrono::nanoseconds(nanos_remainder);
+        std::chrono::system_clock::time_point(duration);
     
     return tp;
 }

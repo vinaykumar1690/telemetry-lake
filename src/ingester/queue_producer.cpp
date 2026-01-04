@@ -88,8 +88,8 @@ bool QueueProducer::initialize() {
             return false;
         }
         
-        // Set delivery report callback
-        rd_kafka_conf_set_dr_cb(conf, DeliveryReportCb::dr_cb);
+        // Set delivery report callback (using dr_msg_cb for librdkafka 2.x)
+        rd_kafka_conf_set_dr_msg_cb(conf, DeliveryReportCb::dr_cb);
         rd_kafka_conf_set_opaque(conf, &delivery_cb_);
         
         // Create producer

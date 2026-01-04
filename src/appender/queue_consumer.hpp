@@ -21,9 +21,7 @@ class ExportLogsServiceRequest;
 
 using opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest;
 
-#ifdef HAVE_RDKAFKA
 #include <cppkafka/cppkafka.h>
-#endif
 
 class QueueConsumer {
 public:
@@ -49,10 +47,8 @@ private:
     AppenderConfig config_;
     bool running_;
 
-#ifdef HAVE_RDKAFKA
     std::unique_ptr<cppkafka::Consumer> consumer_;
     std::unique_ptr<cppkafka::Configuration> kafka_config_;
-#endif
 
     opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest deserializeMessage(const std::string& data);
 };

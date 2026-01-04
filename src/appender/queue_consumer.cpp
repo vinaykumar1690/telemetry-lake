@@ -3,10 +3,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
-
-#ifdef HAVE_RDKAFKA
 #include <cppkafka/cppkafka.h>
-#endif
 
 QueueConsumer::QueueConsumer(const AppenderConfig& config)
     : config_(config), running_(false) {
@@ -17,7 +14,6 @@ QueueConsumer::~QueueConsumer() {
 }
 
 bool QueueConsumer::initialize() {
-#ifdef HAVE_RDKAFKA
     try {
         // Create Kafka configuration
         kafka_config_ = std::make_unique<cppkafka::Configuration>(cppkafka::Configuration{
@@ -42,10 +38,6 @@ bool QueueConsumer::initialize() {
         std::cerr << "Failed to initialize QueueConsumer: " << e.what() << std::endl;
         return false;
     }
-#else
-    std::cerr << "QueueConsumer: librdkafka not available. Consumer functionality disabled." << std::endl;
-    return false;
-#endif
 }
 
 void QueueConsumer::start(MessageCallback callback) {
@@ -54,7 +46,6 @@ void QueueConsumer::start(MessageCallback callback) {
         return;
     }
 
-#ifdef HAVE_RDKAFKA
     if (!consumer_) {
         std::cerr << "Consumer not initialized. Call initialize() first." << std::endl;
         return;
@@ -100,10 +91,6 @@ void QueueConsumer::start(MessageCallback callback) {
 
     running_ = false;
     std::cout << "Queue consumer stopped" << std::endl;
-#else
-    std::cerr << "QueueConsumer: librdkafka not available. Cannot start consumer." << std::endl;
-    running_ = false;
-#endif
 }
 
 void QueueConsumer::stop() {
@@ -113,7 +100,6 @@ void QueueConsumer::stop() {
 
     running_ = false;
 
-#ifdef HAVE_RDKAFKA
     if (consumer_) {
         try {
             consumer_->unsubscribe();
@@ -121,7 +107,6 @@ void QueueConsumer::stop() {
             std::cerr << "Error during consumer shutdown: " << e.what() << std::endl;
         }
     }
-#endif
 }
 
 opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest QueueConsumer::deserializeMessage(const std::string& data) {

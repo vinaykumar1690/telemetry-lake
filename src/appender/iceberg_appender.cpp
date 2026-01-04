@@ -3,21 +3,7 @@
 #include <sstream>
 #include <iomanip>
 
-// Try to include DuckDB - if not available, we'll use stubs
-#ifdef HAVE_DUCKDB
-#include "duckdb.hpp"
-#else
-// Stub definitions for when DuckDB is not available
-class DuckDB {
-public:
-    DuckDB(const std::string& path) {}
-};
-class Connection {
-public:
-    Connection(DuckDB& db) {}
-    void Query(const std::string& query) {}
-};
-#endif
+#include "duckdb/duckdb.hpp"
 
 IcebergAppender::IcebergAppender(const AppenderConfig& config)
     : config_(config), buffer_size_bytes_(0), buffer_records_(0) {
@@ -29,7 +15,6 @@ IcebergAppender::~IcebergAppender() {
 }
 
 bool IcebergAppender::initialize() {
-#ifdef HAVE_DUCKDB
     try {
         // Initialize DuckDB (in-memory for now, or use a temp file)
         db_ = std::make_unique<DuckDB>(nullptr);
@@ -53,14 +38,6 @@ bool IcebergAppender::initialize() {
         std::cerr << "Failed to initialize IcebergAppender: " << e.what() << std::endl;
         return false;
     }
-#else
-    std::cerr << "IcebergAppender: DuckDB not available. Iceberg functionality disabled." << std::endl;
-    std::cerr << "Note: This is a placeholder implementation. Full DuckDB integration requires:" << std::endl;
-    std::cerr << "  1. DuckDB library with Iceberg extension" << std::endl;
-    std::cerr << "  2. Proper S3 configuration" << std::endl;
-    std::cerr << "  3. Iceberg REST catalog setup" << std::endl;
-    return false;
-#endif
 }
 
 bool IcebergAppender::append(const std::vector<TransformedLogRecord>& records) {
@@ -95,7 +72,6 @@ bool IcebergAppender::flush() {
         return true; // Nothing to flush
     }
 
-#ifdef HAVE_DUCKDB
     try {
         // In a real implementation, we would:
         // 1. Create a temporary table or use DuckDB's DataChunk API
@@ -119,17 +95,9 @@ bool IcebergAppender::flush() {
         std::cerr << "Error during flush: " << e.what() << std::endl;
         return false;
     }
-#else
-    // Stub implementation
-    std::cout << "Flush called (DuckDB not available, this is a no-op)" << std::endl;
-    buffer_size_bytes_ = 0;
-    buffer_records_ = 0;
-    return true;
-#endif
 }
 
 bool IcebergAppender::createTableIfNotExists() {
-#ifdef HAVE_DUCKDB
     try {
         std::ostringstream create_table_sql;
         create_table_sql << "CREATE TABLE IF NOT EXISTS " << config_.iceberg_table_name << " (\n"
@@ -155,14 +123,9 @@ bool IcebergAppender::createTableIfNotExists() {
         std::cerr << "Error creating Iceberg table: " << e.what() << std::endl;
         return false;
     }
-#else
-    std::cout << "Would create Iceberg table: " << config_.iceberg_table_name << std::endl;
-    return true;
-#endif
 }
 
 bool IcebergAppender::configureStorage() {
-#ifdef HAVE_DUCKDB
     try {
         // Configure S3 credentials
         std::ostringstream s3_config;
@@ -185,10 +148,6 @@ bool IcebergAppender::configureStorage() {
         std::cerr << "Error configuring storage: " << e.what() << std::endl;
         return false;
     }
-#else
-    std::cout << "Would configure S3: " << config_.s3_endpoint << std::endl;
-    return true;
-#endif
 }
 
 bool IcebergAppender::insertRecords(const std::vector<TransformedLogRecord>& records) {

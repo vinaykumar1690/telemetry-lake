@@ -63,34 +63,60 @@ if(PkgConfig_FOUND)
   pkg_check_modules(RDKAFKA rdkafka)
 endif()
 
-if(NOT RDKAFKA_FOUND)
-  # Try to find librdkafka via find_library
+# Always try to find the library directly to get full path
+find_library(RDKAFKA_LIBRARY
+  NAMES rdkafka
+  PATHS
+    /usr/lib
+    /usr/local/lib
+    /opt/homebrew/lib
+    ${RDKAFKA_LIBRARY_DIRS}
+  NO_DEFAULT_PATH
+)
+if(NOT RDKAFKA_LIBRARY)
   find_library(RDKAFKA_LIBRARY
     NAMES rdkafka
     PATHS
       /usr/lib
       /usr/local/lib
       /opt/homebrew/lib
-    REQUIRED
   )
-  
+endif()
+
+# Find include directory
+if(RDKAFKA_FOUND AND RDKAFKA_INCLUDE_DIRS)
+  set(RDKAFKA_INCLUDE_DIR ${RDKAFKA_INCLUDE_DIRS})
+else()
   find_path(RDKAFKA_INCLUDE_DIR
     NAMES librdkafka/rdkafka.h
     PATHS
       /usr/include
       /usr/local/include
       /opt/homebrew/include
-    REQUIRED
+      ${RDKAFKA_INCLUDE_DIRS}
+    NO_DEFAULT_PATH
   )
-  
-  if(RDKAFKA_LIBRARY AND RDKAFKA_INCLUDE_DIR)
+  if(NOT RDKAFKA_INCLUDE_DIR)
+    find_path(RDKAFKA_INCLUDE_DIR
+      NAMES librdkafka/rdkafka.h
+      PATHS
+        /usr/include
+        /usr/local/include
+        /opt/homebrew/include
+    )
+  endif()
+endif()
+
+# Create imported target if we found the library
+if(RDKAFKA_LIBRARY AND RDKAFKA_INCLUDE_DIR)
+  if(NOT TARGET rdkafka::rdkafka)
     add_library(rdkafka::rdkafka UNKNOWN IMPORTED)
     set_target_properties(rdkafka::rdkafka PROPERTIES
       IMPORTED_LOCATION "${RDKAFKA_LIBRARY}"
       INTERFACE_INCLUDE_DIRECTORIES "${RDKAFKA_INCLUDE_DIR}"
     )
-    set(RDKAFKA_FOUND TRUE)
   endif()
+  set(RDKAFKA_FOUND TRUE)
 endif()
 
 # Fail if librdkafka is not found
@@ -105,8 +131,15 @@ FetchContent_Declare(
   GIT_TAG v1.0.0
 )
 
-# Make dependencies available
-FetchContent_MakeAvailable(Crow protobuf opentelemetry_proto googletest duckdb)
+# Fetch cppkafka (C++ wrapper for librdkafka)
+FetchContent_Declare(
+  cppkafka
+  GIT_REPOSITORY https://github.com/mfontanini/cppkafka.git
+  GIT_TAG v0.3.1
+)
+
+# Make dependencies available (librdkafka must be found before cppkafka)
+FetchContent_MakeAvailable(Crow protobuf opentelemetry_proto googletest duckdb cppkafka)
 
 # Configure DuckDB
 set(DUCKDB_BUILD_EXTENSIONS ON CACHE BOOL "" FORCE)
@@ -218,7 +251,12 @@ target_include_directories(otel_receiver PRIVATE
 
 # Create test executable
 enable_testing()
-add_executable(http_server_test tests/test_http_server.cpp src/ingester/http_server.cpp)
+add_executable(http_server_test 
+  tests/test_http_server.cpp 
+  src/ingester/http_server.cpp 
+  src/ingester/queue_producer.cpp
+  src/config.cpp
+)
 
 # Link libraries for test
 target_link_libraries(http_server_test PRIVATE
@@ -229,6 +267,7 @@ target_link_libraries(http_server_test PRIVATE
   protobuf::libprotobuf
   otel_proto
   ZLIB::ZLIB
+  rdkafka::rdkafka
 )
 
 # Include directories for test
@@ -279,6 +318,7 @@ add_executable(otel_appender
 target_link_libraries(otel_appender PRIVATE
   protobuf::libprotobuf
   otel_proto
+  duckdb
 )
 
 # Link librdkafka (required)
@@ -288,5 +328,7 @@ target_link_libraries(otel_appender PRIVATE rdkafka::rdkafka)
 target_include_directories(otel_appender PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${protobuf_SOURCE_DIR}/src
+  ${duckdb_SOURCE_DIR}/src/include
+  ${cppkafka_SOURCE_DIR}/include
 )
 
