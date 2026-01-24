@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: nessie
-    {{- include "iceberg-stack.labels" . | nindent 4 }}
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
 spec:
   type: ClusterIP
   ports:

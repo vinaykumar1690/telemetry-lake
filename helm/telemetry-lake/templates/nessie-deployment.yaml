@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: nessie
-    {{- include "iceberg-stack.labels" . | nindent 4 }}
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
 spec:
   replicas: 1
   selector:
@@ -15,7 +15,7 @@ spec:
     metadata:
       labels:
         app: nessie
-        {{- include "iceberg-stack.labels" . | nindent 8 }}
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
     spec:
       containers:
         - name: nessie
@@ -38,7 +38,7 @@ spec:
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_REGION
               value: "us-east-1"
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_ENDPOINT
-              value: {{ include "iceberg-stack.minioEndpoint" . }}
+              value: {{ include "telemetry-lake.minioEndpoint" . }}
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_PATH-STYLE_ACCESS
               value: "true"
             # S3 credentials via Nessie secret reference

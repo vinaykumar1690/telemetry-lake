@@ -1,11 +1,14 @@
 
 =======================================================================
-  Iceberg Stack has been deployed!
+  Telemetry Lake has been deployed!
 =======================================================================
 
 Namespace: {{ .Values.namespace }}
 
 Components:
+{{- if .Values.kafka.enabled }}
+  - Kafka (Event streaming for log buffering)
+{{- end }}
   - MinIO (S3-compatible storage)
   - Nessie (Iceberg REST Catalog)
   - DuckDB (Query engine with Iceberg support)
@@ -14,6 +17,9 @@ Components:
 WAIT FOR PODS TO BE READY
 -----------------------------------------------------------------------
 
+{{- if .Values.kafka.enabled }}
+kubectl wait --for=condition=ready pod -l app=kafka -n {{ .Values.namespace }} --timeout=120s
+{{- end }}
 kubectl wait --for=condition=ready pod -l app=minio -n {{ .Values.namespace }} --timeout=120s
 kubectl wait --for=condition=ready pod -l app=nessie -n {{ .Values.namespace }} --timeout=120s
 kubectl wait --for=condition=ready pod -l app=duckdb -n {{ .Values.namespace }} --timeout=120s
@@ -72,6 +78,10 @@ Once inside DuckDB, run these commands:
 SERVICE ENDPOINTS (Internal)
 -----------------------------------------------------------------------
 
+{{- if .Values.kafka.enabled }}
+Kafka Bootstrap:   kafka:9092
+Kafka Topic:       {{ .Values.kafka.topics.logs }}
+{{- end }}
 MinIO S3 API:      http://minio:9000
 MinIO Console:     http://minio-console:9001
 Nessie Catalog:    http://nessie:19120/iceberg/
@@ -87,6 +97,24 @@ Access MinIO Console from your browser:
 Then open: http://localhost:9001
 Credentials: {{ .Values.minio.accessKey }} / {{ .Values.minio.secretKey }}
 
+{{- if .Values.kafka.enabled }}
+-----------------------------------------------------------------------
+KAFKA USAGE
+-----------------------------------------------------------------------
+
+Test Kafka connectivity:
+  kubectl exec -n {{ .Values.namespace }} kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+
+Create the telemetry logs topic:
+  kubectl exec -n {{ .Values.namespace }} kafka-0 -- kafka-topics.sh --create --topic {{ .Values.kafka.topics.logs }} --bootstrap-server localhost:9092 --partitions {{ .Values.kafka.config.numPartitions }} --replication-factor {{ .Values.kafka.config.defaultReplicationFactor }}
+
+Produce test messages:
+  kubectl exec -it -n {{ .Values.namespace }} kafka-0 -- kafka-console-producer.sh --topic {{ .Values.kafka.topics.logs }} --bootstrap-server localhost:9092
+
+Consume messages:
+  kubectl exec -it -n {{ .Values.namespace }} kafka-0 -- kafka-console-consumer.sh --topic {{ .Values.kafka.topics.logs }} --from-beginning --bootstrap-server localhost:9092
+
+{{- end }}
 -----------------------------------------------------------------------
 TROUBLESHOOTING
 -----------------------------------------------------------------------
@@ -95,6 +123,9 @@ Check pod status:
   kubectl get pods -n {{ .Values.namespace }}
 
 View logs:
+{{- if .Values.kafka.enabled }}
+  kubectl logs -n {{ .Values.namespace }} kafka-0
+{{- end }}
   kubectl logs -n {{ .Values.namespace }} minio-0
   kubectl logs -n {{ .Values.namespace }} -l app=nessie
   kubectl logs -n {{ .Values.namespace }} duckdb-0

@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: minio
-    {{- include "iceberg-stack.labels" . | nindent 4 }}
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
 spec:
   serviceName: minio
   replicas: 1
@@ -16,7 +16,7 @@ spec:
     metadata:
       labels:
         app: minio
-        {{- include "iceberg-stack.labels" . | nindent 8 }}
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
     spec:
       initContainers:
         # Wait for MinIO to be ready, then create bucket

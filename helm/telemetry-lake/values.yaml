@@ -1,5 +1,32 @@
 # Namespace for all resources
-namespace: iceberg-stack
+namespace: telemetry-lake
+
+# Kafka Configuration
+kafka:
+  enabled: true
+  image: bitnami/kafka:latest
+  replicas: 1
+  storage: 2Gi
+  # Kafka broker configuration
+  config:
+    # Auto-create topics when producers/consumers connect
+    autoCreateTopics: true
+    # Default number of partitions for auto-created topics
+    numPartitions: 3
+    # Default replication factor
+    defaultReplicationFactor: 1
+    # Log retention hours
+    logRetentionHours: 1
+  # Topic for telemetry log events
+  topics:
+    logs: telemetry-logs
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
 
 # MinIO Configuration
 minio:

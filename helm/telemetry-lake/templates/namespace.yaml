@@ -3,4 +3,4 @@ kind: Namespace
 metadata:
   name: {{ .Values.namespace }}
   labels:
-    {{- include "iceberg-stack.labels" . | nindent 4 }}
+    {{- include "telemetry-lake.labels" . | nindent 4 }}

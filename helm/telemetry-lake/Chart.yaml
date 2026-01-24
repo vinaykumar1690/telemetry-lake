@@ -1,0 +1,16 @@
+apiVersion: v2
+name: telemetry-lake
+description: A Helm chart for deploying Kafka, MinIO, Nessie (Iceberg REST Catalog), and DuckDB for telemetry data lake
+type: application
+version: 0.2.0
+appVersion: "1.0.0"
+keywords:
+  - iceberg
+  - duckdb
+  - minio
+  - nessie
+  - kafka
+  - data-lake
+  - telemetry
+maintainers:
+  - name: telemetry-lake

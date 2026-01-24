@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: minio
-    {{- include "iceberg-stack.labels" . | nindent 4 }}
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
 spec:
   type: ClusterIP
   ports:
@@ -24,7 +24,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: minio
-    {{- include "iceberg-stack.labels" . | nindent 4 }}
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
 spec:
   {{- if .Values.minio.console.nodePort }}
   type: NodePort

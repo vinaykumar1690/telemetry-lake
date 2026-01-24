@@ -1,0 +1,88 @@
+{{- if .Values.kafka.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: kafka
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  serviceName: kafka-headless
+  replicas: {{ .Values.kafka.replicas }}
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: kafka
+          image: {{ .Values.kafka.image }}
+          ports:
+            - name: client
+              containerPort: 9092
+              protocol: TCP
+            - name: controller
+              containerPort: 9093
+              protocol: TCP
+          env:
+            # KRaft mode configuration (no Zookeeper)
+            - name: KAFKA_CFG_NODE_ID
+              value: "0"
+            - name: KAFKA_CFG_PROCESS_ROLES
+              value: "controller,broker"
+            - name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS
+              value: "0@kafka-0.kafka-headless:9093"
+            - name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            # Listener configuration
+            - name: KAFKA_CFG_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://:9093"
+            - name: KAFKA_CFG_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka:9092"
+            - name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_CFG_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            # Topic configuration
+            - name: KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE
+              value: {{ .Values.kafka.config.autoCreateTopics | quote }}
+            - name: KAFKA_CFG_NUM_PARTITIONS
+              value: {{ .Values.kafka.config.numPartitions | quote }}
+            - name: KAFKA_CFG_DEFAULT_REPLICATION_FACTOR
+              value: {{ .Values.kafka.config.defaultReplicationFactor | quote }}
+            # Log retention
+            - name: KAFKA_CFG_LOG_RETENTION_HOURS
+              value: {{ .Values.kafka.config.logRetentionHours | quote }}
+            # Allow plaintext listener
+            - name: ALLOW_PLAINTEXT_LISTENER
+              value: "yes"
+          resources:
+            {{- toYaml .Values.kafka.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/kafka
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 30
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.kafka.storage }}
+{{- end }}

@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: duckdb
-    {{- include "iceberg-stack.labels" . | nindent 4 }}
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
 data:
   init.sql: |
     -- Install and load required extensions

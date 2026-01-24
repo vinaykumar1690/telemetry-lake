@@ -1,55 +1,115 @@
-# Iceberg Stack Deployment Plan
+# Telemetry Lake Helm Chart
 
-This document describes the Helm chart deployment for running MinIO, Nessie (Iceberg REST Catalog), and DuckDB in a Kubernetes cluster on Docker Desktop.
+This document describes the Helm chart deployment for running Kafka, MinIO, Nessie (Iceberg REST Catalog), and DuckDB in a Kubernetes cluster on Docker Desktop.
 
 ## Overview
 
-The `iceberg-stack` Helm chart deploys three components that work together to provide a complete Iceberg data lake development environment:
+The `telemetry-lake` Helm chart deploys four components that work together to provide a complete telemetry data lake development environment:
 
-1. **MinIO** - S3-compatible object storage for Iceberg data files
-2. **Nessie** - Iceberg REST catalog (manages table metadata)
-3. **DuckDB** - Interactive pod for creating/reading/writing Iceberg tables
+1. **Kafka** - Event streaming platform for buffering log events
+2. **MinIO** - S3-compatible object storage for Iceberg data files
+3. **Nessie** - Iceberg REST catalog (manages table metadata)
+4. **DuckDB** - Interactive pod for creating/reading/writing Iceberg tables
+
+### Data Flow
+
+```
+Log Events → Kafka (buffer) → DuckDB Appender → Iceberg Tables (MinIO + Nessie)
+```
+
+Kafka acts as a buffer for incoming telemetry/log events. The DuckDB appender consumes events from Kafka and writes them to Iceberg tables stored in MinIO, with metadata managed by Nessie.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Kubernetes Cluster (Docker Desktop)                   │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │                     iceberg-stack Namespace                       │   │
-│  │                                                                    │   │
-│  │   ┌─────────────────┐      ┌─────────────────┐                    │   │
-│  │   │   DuckDB Pod    │      │   Nessie Pod    │                    │   │
-│  │   │  (StatefulSet)  │      │  (Deployment)   │                    │   │
-│  │   │                 │      │                 │                    │   │
-│  │   │ - duckdb CLI    │─────▶│ Port: 19120     │                    │   │
-│  │   │ - iceberg ext   │      │ REST Catalog    │                    │   │
-│  │   │ - httpfs ext    │      │ Port: 9000      │                    │   │
-│  │   │                 │      │ (Management)    │                    │   │
-│  │   └────────┬────────┘      └────────┬────────┘                    │   │
-│  │            │                        │                              │   │
-│  │            │    ┌───────────────────┘                              │   │
-│  │            │    │                                                  │   │
-│  │            ▼    ▼                                                  │   │
-│  │   ┌─────────────────────────────────────────┐                     │   │
-│  │   │           MinIO (StatefulSet)           │                     │   │
-│  │   │                                          │                     │   │
-│  │   │  Port: 9000 (S3 API)                    │                     │   │
-│  │   │  Port: 9001 (Console)                   │                     │   │
-│  │   │                                          │                     │   │
-│  │   │  Bucket: telemetrylake                  │                     │   │
-│  │   │  PersistentVolume for data              │                     │   │
-│  │   └─────────────────────────────────────────┘                     │   │
-│  │                                                                    │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster (Docker Desktop)                       │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │                      telemetry-lake Namespace                           │ │
+│  │                                                                          │ │
+│  │   ┌─────────────────┐                                                   │ │
+│  │   │   Kafka Pod     │                                                   │ │
+│  │   │  (StatefulSet)  │                                                   │ │
+│  │   │                 │                                                   │ │
+│  │   │ Port: 9092      │◀──── Log Events (Producers)                       │ │
+│  │   │ (Client)        │                                                   │ │
+│  │   │ Port: 9093      │                                                   │ │
+│  │   │ (Controller)    │                                                   │ │
+│  │   └────────┬────────┘                                                   │ │
+│  │            │                                                             │ │
+│  │            │ Consume Events                                             │ │
+│  │            ▼                                                             │ │
+│  │   ┌─────────────────┐      ┌─────────────────┐                          │ │
+│  │   │   DuckDB Pod    │      │   Nessie Pod    │                          │ │
+│  │   │  (StatefulSet)  │      │  (Deployment)   │                          │ │
+│  │   │                 │      │                 │                          │ │
+│  │   │ - duckdb CLI    │─────▶│ Port: 19120     │                          │ │
+│  │   │ - iceberg ext   │      │ REST Catalog    │                          │ │
+│  │   │ - httpfs ext    │      │ Port: 9000      │                          │ │
+│  │   │                 │      │ (Management)    │                          │ │
+│  │   └────────┬────────┘      └────────┬────────┘                          │ │
+│  │            │                        │                                    │ │
+│  │            │    ┌───────────────────┘                                    │ │
+│  │            │    │                                                        │ │
+│  │            ▼    ▼                                                        │ │
+│  │   ┌─────────────────────────────────────────┐                           │ │
+│  │   │           MinIO (StatefulSet)           │                           │ │
+│  │   │                                          │                           │ │
+│  │   │  Port: 9000 (S3 API)                    │                           │ │
+│  │   │  Port: 9001 (Console)                   │                           │ │
+│  │   │                                          │                           │ │
+│  │   │  Bucket: telemetrylake                  │                           │ │
+│  │   │  PersistentVolume for data              │                           │ │
+│  │   └─────────────────────────────────────────┘                           │ │
+│  │                                                                          │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
 
-### 1. MinIO (StatefulSet)
+### 1. Kafka (StatefulSet)
+
+Kafka provides event streaming for buffering telemetry log events before they are written to Iceberg tables. Uses KRaft mode (no Zookeeper dependency).
+
+| Property | Value |
+|----------|-------|
+| Image | `bitnami/kafka:latest` |
+| Replicas | 1 |
+| Client Port | 9092 |
+| Controller Port | 9093 |
+| Storage | PersistentVolumeClaim (2Gi default) |
+| Mode | KRaft (Zookeeper-less) |
+
+**Configuration:**
+- Auto-create topics enabled
+- Default partitions: 3
+- Default replication factor: 1
+- Log retention: 1 hour (configurable)
+- Default topic for logs: `telemetry-logs`
+
+**Services:**
+- `kafka` (ClusterIP): Port 9092 - Client connections
+- `kafka-headless` (Headless): Ports 9092, 9093 - StatefulSet DNS
+
+**Usage:**
+```bash
+# List topics
+kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+
+# Create a topic
+kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --create --topic telemetry-logs --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+
+# Produce messages
+kubectl exec -it -n telemetry-lake kafka-0 -- kafka-console-producer.sh --topic telemetry-logs --bootstrap-server localhost:9092
+
+# Consume messages
+kubectl exec -it -n telemetry-lake kafka-0 -- kafka-console-consumer.sh --topic telemetry-logs --from-beginning --bootstrap-server localhost:9092
+```
+
+### 2. MinIO (StatefulSet)
 
 MinIO provides S3-compatible object storage where Iceberg stores its data files (Parquet) and metadata.
 
@@ -71,7 +131,7 @@ MinIO provides S3-compatible object storage where Iceberg stores its data files 
 - `minio` (ClusterIP): Port 9000 - S3 API endpoint
 - `minio-console` (ClusterIP): Port 9001 - Web console (optional NodePort for external access)
 
-### 2. Nessie (Deployment)
+### 3. Nessie (Deployment)
 
 Nessie serves as the Iceberg REST catalog, managing table metadata and providing transactional guarantees.
 
@@ -110,7 +170,7 @@ MY-SECRETS_S3-DEFAULT_SECRET=<secret-key>
 
 **Iceberg REST Endpoint:** `http://nessie:19120/iceberg/`
 
-### 3. DuckDB (StatefulSet)
+### 4. DuckDB (StatefulSet)
 
 DuckDB runs as an interactive pod where you can create, write, and read Iceberg tables. The pod uses a standard Debian image and installs DuckDB at runtime.
 
@@ -134,7 +194,7 @@ The DuckDB pod runs an init script that:
 
 **Access Method:**
 ```bash
-kubectl exec -it -n iceberg-stack duckdb-0 -- duckdb
+kubectl exec -it -n telemetry-lake duckdb-0 -- duckdb
 ```
 
 ## Service Discovery
@@ -143,6 +203,7 @@ All components communicate via Kubernetes internal DNS:
 
 | Service | DNS Name | URL |
 |---------|----------|-----|
+| Kafka Bootstrap | `kafka` | `kafka:9092` |
 | MinIO S3 API | `minio` | `http://minio:9000` |
 | MinIO Console | `minio-console` | `http://minio-console:9001` |
 | Nessie Catalog | `nessie` | `http://nessie:19120/iceberg/` |
@@ -150,13 +211,15 @@ All components communicate via Kubernetes internal DNS:
 ## Helm Chart Structure
 
 ```
-helm/iceberg-stack/
+helm/telemetry-lake/
 ├── Chart.yaml                    # Chart metadata
 ├── values.yaml                   # Default configuration values
 ├── templates/
 │   ├── _helpers.tpl              # Template helpers
 │   ├── namespace.yaml            # Namespace definition
 │   ├── secrets.yaml              # S3 credentials secret
+│   ├── kafka-statefulset.yaml    # Kafka StatefulSet
+│   ├── kafka-service.yaml        # Kafka Services
 │   ├── minio-statefulset.yaml    # MinIO StatefulSet
 │   ├── minio-service.yaml        # MinIO Services
 │   ├── nessie-deployment.yaml    # Nessie Deployment
@@ -173,7 +236,28 @@ helm/iceberg-stack/
 
 ```yaml
 # Namespace for all resources
-namespace: iceberg-stack
+namespace: telemetry-lake
+
+# Kafka Configuration
+kafka:
+  enabled: true
+  image: bitnami/kafka:latest
+  replicas: 1
+  storage: 2Gi
+  config:
+    autoCreateTopics: true
+    numPartitions: 3
+    defaultReplicationFactor: 1
+    logRetentionHours: 1
+  topics:
+    logs: telemetry-logs
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
 
 # MinIO Configuration
 minio:
@@ -230,8 +314,8 @@ duckdb:
 ### Step 1: Install Helm Chart
 
 ```bash
-cd helm/iceberg-stack
-helm install iceberg-stack .
+cd helm/telemetry-lake
+helm install telemetry-lake .
 ```
 
 Note: No custom Docker image build is required. DuckDB is installed at runtime from the official GitHub releases.
@@ -239,25 +323,29 @@ Note: No custom Docker image build is required. DuckDB is installed at runtime f
 ### Step 2: Wait for Pods
 
 ```bash
-kubectl wait --for=condition=ready pod -l app=minio -n iceberg-stack --timeout=120s
-kubectl wait --for=condition=ready pod -l app=nessie -n iceberg-stack --timeout=120s
-kubectl wait --for=condition=ready pod -l app=duckdb -n iceberg-stack --timeout=120s
+kubectl wait --for=condition=ready pod -l app=kafka -n telemetry-lake --timeout=120s
+kubectl wait --for=condition=ready pod -l app=minio -n telemetry-lake --timeout=120s
+kubectl wait --for=condition=ready pod -l app=nessie -n telemetry-lake --timeout=120s
+kubectl wait --for=condition=ready pod -l app=duckdb -n telemetry-lake --timeout=120s
 ```
 
 ### Step 3: Verify Connectivity
 
 ```bash
+# Test Kafka
+kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+
 # Test MinIO
-kubectl exec -n iceberg-stack duckdb-0 -- curl -s http://minio:9000/minio/health/live
+kubectl exec -n telemetry-lake duckdb-0 -- curl -s http://minio:9000/minio/health/live
 
 # Test Nessie
-kubectl exec -n iceberg-stack duckdb-0 -- curl -s http://nessie:19120/api/v2/config
+kubectl exec -n telemetry-lake duckdb-0 -- curl -s http://nessie:19120/api/v2/config
 ```
 
 ### Step 4: Access DuckDB
 
 ```bash
-kubectl exec -it -n iceberg-stack duckdb-0 -- duckdb
+kubectl exec -it -n telemetry-lake duckdb-0 -- duckdb
 ```
 
 ## Usage Examples
@@ -316,21 +404,28 @@ This section provides step-by-step commands to verify the entire stack is workin
 ### Step 1: Verify All Pods Are Running
 
 ```bash
-kubectl get pods -n iceberg-stack
+kubectl get pods -n telemetry-lake
 ```
 
 Expected output:
 ```
 NAME                      READY   STATUS    RESTARTS   AGE
+kafka-0                   1/1     Running   0          5m
 duckdb-0                  1/1     Running   0          5m
 minio-0                   1/1     Running   0          5m
 nessie-xxxxxxxxxx-xxxxx   1/1     Running   0          5m
 ```
 
-### Step 2: Verify DuckDB Version
+### Step 2: Verify Kafka is Running
 
 ```bash
-kubectl exec -n iceberg-stack duckdb-0 -- duckdb -c "SELECT version();"
+kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+```
+
+### Step 3: Verify DuckDB Version
+
+```bash
+kubectl exec -n telemetry-lake duckdb-0 -- duckdb -c "SELECT version();"
 ```
 
 Expected output (v1.4+ required for Iceberg REST catalog):
@@ -343,11 +438,11 @@ Expected output (v1.4+ required for Iceberg REST catalog):
 └─────────────┘
 ```
 
-### Step 3: Test Service Connectivity
+### Step 4: Test Service Connectivity
 
 ```bash
 # Test Nessie REST API
-kubectl exec -n iceberg-stack duckdb-0 -- curl -s http://nessie:19120/api/v2/config
+kubectl exec -n telemetry-lake duckdb-0 -- curl -s http://nessie:19120/api/v2/config
 ```
 
 Expected output (JSON with Nessie configuration):
@@ -360,12 +455,12 @@ Expected output (JSON with Nessie configuration):
 }
 ```
 
-### Step 4: Create an Iceberg Table and Insert Data
+### Step 5: Create an Iceberg Table and Insert Data
 
 Run this command to create a table and insert test data:
 
 ```bash
-kubectl exec -n iceberg-stack duckdb-0 -- duckdb -c "
+kubectl exec -n telemetry-lake duckdb-0 -- duckdb -c "
 LOAD iceberg;
 LOAD httpfs;
 
@@ -403,10 +498,10 @@ SELECT 'Data inserted successfully' as status;
 "
 ```
 
-### Step 5: Query the Iceberg Table
+### Step 6: Query the Iceberg Table
 
 ```bash
-kubectl exec -n iceberg-stack duckdb-0 -- duckdb -c "
+kubectl exec -n telemetry-lake duckdb-0 -- duckdb -c "
 LOAD iceberg;
 LOAD httpfs;
 
@@ -461,13 +556,13 @@ Expected output:
 └───────┴─────────┴─────────────────────┴─────────────────────┘
 ```
 
-### Step 6: Verify Data Files in MinIO
+### Step 7: Verify Data Files in MinIO
 
 Check that Iceberg data files (Parquet) and metadata are stored in MinIO:
 
 ```bash
-kubectl exec -n iceberg-stack minio-0 -- mc alias set local http://localhost:9000 minioadmin minioadmin
-kubectl exec -n iceberg-stack minio-0 -- mc ls --recursive local/telemetrylake/
+kubectl exec -n telemetry-lake minio-0 -- mc alias set local http://localhost:9000 minioadmin minioadmin
+kubectl exec -n telemetry-lake minio-0 -- mc ls --recursive local/telemetrylake/
 ```
 
 Expected output (file names will vary):
@@ -483,12 +578,12 @@ This confirms:
 - `.avro` - Manifest files tracking data files
 - `.metadata.json` - Iceberg table metadata
 
-### Step 7: Access MinIO Console (Optional)
+### Step 8: Access MinIO Console (Optional)
 
 Port-forward the MinIO console to view data via web UI:
 
 ```bash
-kubectl port-forward -n iceberg-stack svc/minio-console 9001:9001
+kubectl port-forward -n telemetry-lake svc/minio-console 9001:9001
 ```
 
 Then open http://localhost:9001 in your browser.
@@ -502,23 +597,31 @@ Navigate to the `telemetrylake` bucket to see the Iceberg table files.
 ### Check Pod Status
 
 ```bash
-kubectl get pods -n iceberg-stack
+kubectl get pods -n telemetry-lake
 ```
 
 ### View Pod Logs
 
 ```bash
+# Kafka logs
+kubectl logs -n telemetry-lake kafka-0
+
 # MinIO logs
-kubectl logs -n iceberg-stack minio-0
+kubectl logs -n telemetry-lake minio-0
 
 # Nessie logs
-kubectl logs -n iceberg-stack -l app=nessie
+kubectl logs -n telemetry-lake -l app=nessie
 
 # DuckDB logs
-kubectl logs -n iceberg-stack duckdb-0
+kubectl logs -n telemetry-lake duckdb-0
 ```
 
 ### Common Issues
+
+**Kafka not starting:**
+- Check that KRaft mode is properly configured
+- Verify storage provisioner is available in your cluster
+- Check logs: `kubectl logs -n telemetry-lake kafka-0`
 
 **Nessie health check failing (503 errors):**
 - Ensure the health probes are configured for port 9000 (management port), not 19120
@@ -534,20 +637,26 @@ kubectl logs -n iceberg-stack duckdb-0
 ### Test MinIO Connectivity
 
 ```bash
-kubectl exec -n iceberg-stack duckdb-0 -- curl http://minio:9000/minio/health/live
+kubectl exec -n telemetry-lake duckdb-0 -- curl http://minio:9000/minio/health/live
 ```
 
 ### Test Nessie Connectivity
 
 ```bash
-kubectl exec -n iceberg-stack duckdb-0 -- curl http://nessie:19120/api/v2/config
+kubectl exec -n telemetry-lake duckdb-0 -- curl http://nessie:19120/api/v2/config
+```
+
+### Test Kafka Connectivity
+
+```bash
+kubectl exec -n telemetry-lake kafka-0 -- kafka-broker-api-versions.sh --bootstrap-server localhost:9092
 ```
 
 ## Cleanup
 
 ```bash
-helm uninstall iceberg-stack
-kubectl delete namespace iceberg-stack
+helm uninstall telemetry-lake
+kubectl delete namespace telemetry-lake
 ```
 
 ## Security Considerations
@@ -556,6 +665,7 @@ For production use, consider:
 
 1. **Secrets Management**: Use external secrets management (e.g., Vault, AWS Secrets Manager)
 2. **Network Policies**: Restrict pod-to-pod communication
-3. **TLS**: Enable TLS for all services
-4. **Authentication**: Configure Nessie authentication
+3. **TLS**: Enable TLS for all services (Kafka, MinIO, Nessie)
+4. **Authentication**: Configure Nessie authentication and Kafka SASL
 5. **Resource Limits**: Set CPU/memory limits on all pods
+6. **Kafka ACLs**: Configure access control lists for Kafka topics
