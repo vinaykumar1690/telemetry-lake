@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: minio
+    {{- include "iceberg-stack.labels" . | nindent 4 }}
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+        {{- include "iceberg-stack.labels" . | nindent 8 }}
+    spec:
+      initContainers:
+        # Wait for MinIO to be ready, then create bucket
+        - name: create-bucket
+          image: {{ .Values.minio.image }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Start MinIO in background temporarily to create bucket
+              minio server /data --console-address ":9001" &
+              MINIO_PID=$!
+
+              # Wait for MinIO to be ready
+              until mc alias set myminio http://localhost:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} 2>/dev/null; do
+                echo "Waiting for MinIO to be ready..."
+                sleep 2
+              done
+
+              # Create bucket if it doesn't exist
+              mc mb myminio/{{ .Values.minio.bucket }} --ignore-existing
+              echo "Bucket {{ .Values.minio.bucket }} created or already exists"
+
+              # Set bucket policy to allow read/write access
+              mc anonymous set public myminio/{{ .Values.minio.bucket }}
+              echo "Bucket policy set to public"
+
+              # Stop the temporary MinIO server
+              kill $MINIO_PID
+              wait $MINIO_PID 2>/dev/null || true
+              echo "Init complete"
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: secret-key
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image }}
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: secret-key
+          ports:
+            - name: api
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.minio.storage }}

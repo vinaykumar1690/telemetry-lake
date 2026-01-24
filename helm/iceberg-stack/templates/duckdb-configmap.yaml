@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: duckdb-init
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: duckdb
+    {{- include "iceberg-stack.labels" . | nindent 4 }}
+data:
+  init.sql: |
+    -- Install and load required extensions
+    INSTALL iceberg;
+    INSTALL httpfs;
+    LOAD iceberg;
+    LOAD httpfs;
+
+    -- Create S3 secret for MinIO access
+    CREATE SECRET s3_secret (
+        TYPE S3,
+        KEY_ID '{{ .Values.minio.accessKey }}',
+        SECRET '{{ .Values.minio.secretKey }}',
+        ENDPOINT 'minio:9000',
+        USE_SSL false,
+        URL_STYLE 'path'
+    );
+
+    -- Show confirmation
+    SELECT 'DuckDB initialized with Iceberg and HTTPFS extensions' AS status;
+    SELECT 'S3 secret configured for MinIO' AS status;
+
+  init.sh: |
+    #!/bin/sh
+    set -e
+
+    echo "Initializing DuckDB extensions..."
+
+    # Run the init SQL to install extensions
+    duckdb -c "INSTALL iceberg; INSTALL httpfs;"
+
+    echo "Extensions installed successfully"
+    echo "DuckDB is ready. Use 'duckdb' to start the shell."
+
+    # Keep the container running
+    tail -f /dev/null

@@ -1,0 +1,46 @@
+# Namespace for all resources
+namespace: iceberg-stack
+
+# MinIO Configuration
+minio:
+  image: minio/minio:latest
+  accessKey: minioadmin
+  secretKey: minioadmin
+  bucket: telemetrylake
+  storage: 1Gi
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  console:
+    enabled: true
+    # Set nodePort to expose console externally (e.g., 30901)
+    nodePort: null
+
+# Nessie Configuration
+nessie:
+  image: ghcr.io/projectnessie/nessie:latest
+  warehouse: telemetrylake
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# DuckDB Configuration
+duckdb:
+  image: debian:bookworm-slim
+  imagePullPolicy: IfNotPresent
+  storage: 1Gi
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"

@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: minio
+    {{- include "iceberg-stack.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+  selector:
+    app: minio
+---
+{{- if .Values.minio.console.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-console
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: minio
+    {{- include "iceberg-stack.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.minio.console.nodePort }}
+  type: NodePort
+  {{- else }}
+  type: ClusterIP
+  {{- end }}
+  ports:
+    - name: console
+      port: 9001
+      targetPort: 9001
+      protocol: TCP
+      {{- if .Values.minio.console.nodePort }}
+      nodePort: {{ .Values.minio.console.nodePort }}
+      {{- end }}
+  selector:
+    app: minio
+{{- end }}

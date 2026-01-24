@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nessie
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: nessie
+    {{- include "iceberg-stack.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nessie
+  template:
+    metadata:
+      labels:
+        app: nessie
+        {{- include "iceberg-stack.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: nessie
+          image: {{ .Values.nessie.image }}
+          ports:
+            - name: http
+              containerPort: 19120
+              protocol: TCP
+            - name: management
+              containerPort: 9000
+              protocol: TCP
+          env:
+            # Nessie catalog configuration (matching mac-setup.md format)
+            - name: NESSIE_CATALOG_DEFAULT-WAREHOUSE
+              value: {{ .Values.nessie.warehouse }}
+            # Warehouse location in S3
+            - name: NESSIE_CATALOG_WAREHOUSES_{{ .Values.nessie.warehouse | upper }}_LOCATION
+              value: "s3://{{ .Values.minio.bucket }}"
+            # S3 endpoint configuration for MinIO
+            - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_REGION
+              value: "us-east-1"
+            - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_ENDPOINT
+              value: {{ include "iceberg-stack.minioEndpoint" . }}
+            - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_PATH-STYLE_ACCESS
+              value: "true"
+            # S3 credentials via Nessie secret reference
+            - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_AUTH-TYPE
+              value: "STATIC"
+            - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_ACCESS-KEY
+              value: "urn:nessie-secret:quarkus:my-secrets.s3-default"
+            # Quarkus secret values
+            - name: MY-SECRETS_S3-DEFAULT_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: access-key
+            - name: MY-SECRETS_S3-DEFAULT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: secret-key
+          resources:
+            {{- toYaml .Values.nessie.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 9000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 5

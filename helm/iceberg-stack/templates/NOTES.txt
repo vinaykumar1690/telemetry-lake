@@ -1,0 +1,113 @@
+
+=======================================================================
+  Iceberg Stack has been deployed!
+=======================================================================
+
+Namespace: {{ .Values.namespace }}
+
+Components:
+  - MinIO (S3-compatible storage)
+  - Nessie (Iceberg REST Catalog)
+  - DuckDB (Query engine with Iceberg support)
+
+-----------------------------------------------------------------------
+WAIT FOR PODS TO BE READY
+-----------------------------------------------------------------------
+
+kubectl wait --for=condition=ready pod -l app=minio -n {{ .Values.namespace }} --timeout=120s
+kubectl wait --for=condition=ready pod -l app=nessie -n {{ .Values.namespace }} --timeout=120s
+kubectl wait --for=condition=ready pod -l app=duckdb -n {{ .Values.namespace }} --timeout=120s
+
+-----------------------------------------------------------------------
+ACCESS DUCKDB
+-----------------------------------------------------------------------
+
+Start an interactive DuckDB session:
+
+  kubectl exec -it -n {{ .Values.namespace }} duckdb-0 -- duckdb
+
+-----------------------------------------------------------------------
+QUICK START: CREATE AN ICEBERG TABLE
+-----------------------------------------------------------------------
+
+Once inside DuckDB, run these commands:
+
+  -- Load extensions
+  LOAD iceberg;
+  LOAD httpfs;
+
+  -- Configure S3 for MinIO
+  CREATE SECRET s3_secret (
+      TYPE S3,
+      KEY_ID '{{ .Values.minio.accessKey }}',
+      SECRET '{{ .Values.minio.secretKey }}',
+      ENDPOINT 'minio:9000',
+      USE_SSL false,
+      URL_STYLE 'path'
+  );
+
+  -- Attach to Nessie catalog
+  ATTACH 'nessie' AS nessie (
+      TYPE ICEBERG,
+      ENDPOINT 'http://nessie:19120/iceberg',
+      WAREHOUSE '{{ .Values.nessie.warehouse }}'
+  );
+
+  -- Create a table
+  CREATE TABLE nessie.main.test_table (
+      id INTEGER,
+      name VARCHAR,
+      created_at TIMESTAMP
+  );
+
+  -- Insert data
+  INSERT INTO nessie.main.test_table VALUES
+      (1, 'Alice', '2024-01-01 00:00:00'),
+      (2, 'Bob', '2024-01-02 00:00:00');
+
+  -- Query data
+  SELECT * FROM nessie.main.test_table;
+
+-----------------------------------------------------------------------
+SERVICE ENDPOINTS (Internal)
+-----------------------------------------------------------------------
+
+MinIO S3 API:      http://minio:9000
+MinIO Console:     http://minio-console:9001
+Nessie Catalog:    http://nessie:19120/iceberg/
+
+-----------------------------------------------------------------------
+PORT FORWARDING (Optional)
+-----------------------------------------------------------------------
+
+Access MinIO Console from your browser:
+
+  kubectl port-forward -n {{ .Values.namespace }} svc/minio-console 9001:9001
+
+Then open: http://localhost:9001
+Credentials: {{ .Values.minio.accessKey }} / {{ .Values.minio.secretKey }}
+
+-----------------------------------------------------------------------
+TROUBLESHOOTING
+-----------------------------------------------------------------------
+
+Check pod status:
+  kubectl get pods -n {{ .Values.namespace }}
+
+View logs:
+  kubectl logs -n {{ .Values.namespace }} minio-0
+  kubectl logs -n {{ .Values.namespace }} -l app=nessie
+  kubectl logs -n {{ .Values.namespace }} duckdb-0
+
+Test connectivity from DuckDB pod:
+  kubectl exec -n {{ .Values.namespace }} duckdb-0 -- curl -s http://minio:9000/minio/health/live
+  kubectl exec -n {{ .Values.namespace }} duckdb-0 -- curl -s http://nessie:19120/api/v2/config
+
+-----------------------------------------------------------------------
+CLEANUP
+-----------------------------------------------------------------------
+
+  helm uninstall {{ .Release.Name }} -n {{ .Values.namespace }}
+  kubectl delete namespace {{ .Values.namespace }}
+
+=======================================================================
