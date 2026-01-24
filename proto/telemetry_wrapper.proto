@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package telemetry.v1;
+
+// Enum representing the type of telemetry data
+enum TelemetryType {
+    TELEMETRY_TYPE_UNSPECIFIED = 0;
+    OTEL_LOGS = 1;
+}
+
+// Wrapper message for raw telemetry data
+// Used to pass unprocessed payloads through the queue for deferred parsing
+message RawTelemetryMessage {
+    // Content type of the payload (e.g., "application/json", "application/x-protobuf")
+    string content_type = 1;
+
+    // Type of telemetry data contained in the payload
+    TelemetryType telemetry_type = 2;
+
+    // Raw payload bytes (already decompressed if gzip was used)
+    bytes payload = 3;
+}

@@ -6,7 +6,7 @@
 #include <functional>
 #include <memory>
 
-// Forward declaration
+// Forward declarations
 namespace opentelemetry {
 namespace proto {
 namespace collector {
@@ -16,6 +16,12 @@ class ExportLogsServiceRequest;
 }
 }
 }
+}
+}
+
+namespace telemetry {
+namespace v1 {
+class RawTelemetryMessage;
 }
 }
 
@@ -50,7 +56,12 @@ private:
     std::unique_ptr<cppkafka::Consumer> consumer_;
     std::unique_ptr<cppkafka::Configuration> kafka_config_;
 
-    opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest deserializeMessage(const std::string& data);
+    // Deserialize wrapper message from queue
+    telemetry::v1::RawTelemetryMessage deserializeWrapper(const std::string& data);
+
+    // Parse payload into ExportLogsServiceRequest based on content_type
+    opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest parsePayload(
+        const telemetry::v1::RawTelemetryMessage& wrapper);
 };
 
 #endif // QUEUE_CONSUMER_HPP

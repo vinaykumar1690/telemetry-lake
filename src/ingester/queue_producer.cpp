@@ -1,4 +1,5 @@
 #include "queue_producer.hpp"
+#include "telemetry_wrapper.pb.h"
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -120,8 +121,8 @@ bool QueueProducer::initialize() {
 }
 
 ProduceResult QueueProducer::produce(
-    const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request) {
-    
+    const telemetry::v1::RawTelemetryMessage& message) {
+
     // Check backpressure
     if (isAtCapacity()) {
         return ProduceResult::QUEUE_FULL;
@@ -130,13 +131,13 @@ ProduceResult QueueProducer::produce(
     try {
         // Increment in-flight count before producing
         in_flight_count_.fetch_add(1);
-        
-        // Serialize the request
-        std::string serialized = serializeRequest(request);
-        
+
+        // Serialize the message
+        std::string serialized = serializeMessage(message);
+
         // Produce with retry (will decrement counter on error)
         ProduceResult result = produceWithRetry(serialized, 0);
-        
+
         return result;
     } catch (const std::exception& e) {
         std::cerr << "Error producing message: " << e.what() << std::endl;
@@ -198,11 +199,11 @@ ProduceResult QueueProducer::produceWithRetry(const std::string& serialized_data
     }
 }
 
-std::string QueueProducer::serializeRequest(
-    const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request) {
+std::string QueueProducer::serializeMessage(
+    const telemetry::v1::RawTelemetryMessage& message) {
     std::string serialized;
-    if (!request.SerializeToString(&serialized)) {
-        throw std::runtime_error("Failed to serialize ExportLogsServiceRequest");
+    if (!message.SerializeToString(&serialized)) {
+        throw std::runtime_error("Failed to serialize RawTelemetryMessage");
     }
     return serialized;
 }

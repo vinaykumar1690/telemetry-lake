@@ -1,5 +1,7 @@
 #include "queue_consumer.hpp"
+#include "telemetry_wrapper.pb.h"
 #include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
+#include <google/protobuf/util/json_util.h>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -70,11 +72,12 @@ void QueueConsumer::start(MessageCallback callback) {
                     }
                 }
 
-                // Deserialize and call callback
+                // Deserialize wrapper and parse payload
                 try {
-                    auto request = deserializeMessage(msg.get_payload());
+                    auto wrapper = deserializeWrapper(msg.get_payload());
+                    auto request = parsePayload(wrapper);
                     callback(request);
-                    
+
                     // Commit offset after successful processing
                     consumer_->commit(msg);
                 } catch (const std::exception& e) {
@@ -109,11 +112,34 @@ void QueueConsumer::stop() {
     }
 }
 
-opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest QueueConsumer::deserializeMessage(const std::string& data) {
-    opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest request;
-    if (!request.ParseFromString(data)) {
-        throw std::runtime_error("Failed to deserialize ExportLogsServiceRequest");
+telemetry::v1::RawTelemetryMessage QueueConsumer::deserializeWrapper(const std::string& data) {
+    telemetry::v1::RawTelemetryMessage wrapper;
+    if (!wrapper.ParseFromString(data)) {
+        throw std::runtime_error("Failed to deserialize RawTelemetryMessage wrapper");
     }
+    return wrapper;
+}
+
+opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest QueueConsumer::parsePayload(
+    const telemetry::v1::RawTelemetryMessage& wrapper) {
+
+    opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest request;
+    const std::string& content_type = wrapper.content_type();
+    const std::string& payload = wrapper.payload();
+
+    if (content_type == "application/x-protobuf" || content_type == "application/protobuf") {
+        if (!request.ParseFromString(payload)) {
+            throw std::runtime_error("Failed to parse Protobuf payload");
+        }
+    } else if (content_type == "application/json" || content_type == "text/json") {
+        auto status = google::protobuf::util::JsonStringToMessage(payload, &request);
+        if (!status.ok()) {
+            throw std::runtime_error("Failed to parse JSON payload: " + status.ToString());
+        }
+    } else {
+        throw std::runtime_error("Unsupported content type: " + content_type);
+    }
+
     return request;
 }
 

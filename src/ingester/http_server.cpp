@@ -5,10 +5,9 @@
 #include <algorithm>
 #include <cctype>
 #include <zlib.h>
-#include <google/protobuf/util/json_util.h>
+#include "telemetry_wrapper.pb.h"
 #include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
 
-using opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest;
 using opentelemetry::proto::collector::logs::v1::ExportLogsServiceResponse;
 
 static bool decompressGzip(const std::string &in, std::string &out) {
@@ -61,14 +60,21 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
     CROW_ROUTE(app, "/v1/logs")
         .methods("POST"_method)
         ([queue_producer](const crow::request& req){
-            ExportLogsServiceRequest logs_request;
-
             std::string content_type = req.get_header_value("Content-Type");
             // strip parameters like charset
             auto semipos = content_type.find(';');
             if (semipos != std::string::npos) content_type = content_type.substr(0, semipos);
             content_type = to_lower_trimmed(content_type);
 
+            // Validate content type (but don't parse - defer to consumer)
+            if (content_type != "application/x-protobuf" &&
+                content_type != "application/protobuf" &&
+                content_type != "application/json" &&
+                content_type != "text/json") {
+                return crow::response(415, "Unsupported Media Type");
+            }
+
+            // Decompress gzip if needed
             std::string body = req.body;
             std::string content_encoding = to_lower_trimmed(req.get_header_value("Content-Encoding"));
             if (content_encoding == "gzip") {
@@ -79,18 +85,11 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
                 body.swap(decompressed);
             }
 
-            if (content_type == "application/x-protobuf" || content_type == "application/protobuf") {
-                if (!logs_request.ParseFromString(body)) {
-                    return crow::response(400, "Invalid Protobuf payload");
-                }
-            } else if (content_type == "application/json" || content_type == "text/json") {
-                auto status = google::protobuf::util::JsonStringToMessage(body, &logs_request);
-                if (!status.ok()) {
-                    return crow::response(400, ("Invalid JSON payload: " + status.ToString()).c_str());
-                }
-            } else {
-                return crow::response(415, "Unsupported Media Type");
-            }
+            // Create wrapper message with raw (decompressed) payload
+            telemetry::v1::RawTelemetryMessage wrapper;
+            wrapper.set_content_type(content_type);
+            wrapper.set_telemetry_type(telemetry::v1::OTEL_LOGS);
+            wrapper.set_payload(body);
 
             // Produce to queue if available
             if (queue_producer) {
@@ -98,9 +97,9 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
                 if (queue_producer->isAtCapacity()) {
                     return crow::response(429, "Too Many Requests: Queue is at capacity");
                 }
-                
-                ProduceResult result = queue_producer->produce(logs_request);
-                
+
+                ProduceResult result = queue_producer->produce(wrapper);
+
                 if (result == ProduceResult::QUEUE_FULL) {
                     return crow::response(503, "Service Unavailable: Queue is full");
                 } else if (result == ProduceResult::PERSISTENT_ERROR) {
@@ -110,8 +109,8 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
                 }
             } else {
                 // Fallback: just log (for testing without queue)
-                std::cout << "Received ExportLogsServiceRequest with resource_logs="
-                          << logs_request.resource_logs_size() << std::endl;
+                std::cout << "Received RawTelemetryMessage with content_type="
+                          << content_type << ", payload_size=" << body.size() << std::endl;
             }
 
             ExportLogsServiceResponse resp_msg;

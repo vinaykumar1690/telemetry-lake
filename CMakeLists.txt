@@ -148,6 +148,9 @@ set(DUCKDB_EXTENSION_DIRECTORIES "${duckdb_SOURCE_DIR}/extensions" CACHE STRING 
 # Set up OpenTelemetry protobuf compilation
 set(OPENTELEMETRY_PROTO_ROOT ${opentelemetry_proto_SOURCE_DIR})
 
+# Set up custom proto root for our wrapper messages
+set(CUSTOM_PROTO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/proto)
+
 # Generate protobuf C++ files
 # We need to compile the proto files in dependency order
 set(OTEL_PROTO_FILES
@@ -155,6 +158,11 @@ set(OTEL_PROTO_FILES
   "${OPENTELEMETRY_PROTO_ROOT}/opentelemetry/proto/resource/v1/resource.proto"
   "${OPENTELEMETRY_PROTO_ROOT}/opentelemetry/proto/logs/v1/logs.proto"
   "${OPENTELEMETRY_PROTO_ROOT}/opentelemetry/proto/collector/logs/v1/logs_service.proto"
+)
+
+# Custom proto files (telemetry wrapper)
+set(CUSTOM_PROTO_FILES
+  "${CUSTOM_PROTO_ROOT}/telemetry_wrapper.proto"
 )
 
 set(OTEL_PROTO_GENERATED_SRCS)
@@ -220,10 +228,62 @@ foreach(proto_file ${OTEL_PROTO_FILES})
   endif()
 endforeach()
 
-# Create a library for the generated protobuf files
-add_library(otel_proto STATIC ${OTEL_PROTO_GENERATED_SRCS} ${OTEL_PROTO_GENERATED_HDRS})
+# Generate custom proto files (telemetry wrapper)
+set(CUSTOM_PROTO_GENERATED_SRCS)
+set(CUSTOM_PROTO_GENERATED_HDRS)
+
+foreach(proto_file ${CUSTOM_PROTO_FILES})
+  get_filename_component(proto_name ${proto_file} NAME_WE)
+
+  set(src_file ${CMAKE_CURRENT_BINARY_DIR}/${proto_name}.pb.cc)
+  set(hdr_file ${CMAKE_CURRENT_BINARY_DIR}/${proto_name}.pb.h)
+
+  list(APPEND CUSTOM_PROTO_GENERATED_SRCS ${src_file})
+  list(APPEND CUSTOM_PROTO_GENERATED_HDRS ${hdr_file})
+
+  # Generate protobuf files
+  if(TARGET protobuf::protoc)
+    add_custom_command(
+      OUTPUT ${src_file} ${hdr_file}
+      COMMAND $<TARGET_FILE:protobuf::protoc>
+      ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+           --proto_path=${CUSTOM_PROTO_ROOT}
+           ${proto_file}
+      DEPENDS ${proto_file} protobuf::protoc
+      COMMENT "Generating ${proto_name}.pb.cc and ${proto_name}.pb.h"
+    )
+  elseif(TARGET protoc)
+    add_custom_command(
+      OUTPUT ${src_file} ${hdr_file}
+      COMMAND $<TARGET_FILE:protoc>
+      ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+           --proto_path=${CUSTOM_PROTO_ROOT}
+           ${proto_file}
+      DEPENDS ${proto_file} protoc
+      COMMENT "Generating ${proto_name}.pb.cc and ${proto_name}.pb.h"
+    )
+  else()
+    add_custom_command(
+      OUTPUT ${src_file} ${hdr_file}
+      COMMAND ${PROTOC_EXECUTABLE}
+      ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+           --proto_path=${CUSTOM_PROTO_ROOT}
+           ${proto_file}
+      DEPENDS ${proto_file}
+      COMMENT "Generating ${proto_name}.pb.cc and ${proto_name}.pb.h"
+    )
+  endif()
+endforeach()
+
+# Create a library for the generated protobuf files (including custom protos)
+add_library(otel_proto STATIC
+  ${OTEL_PROTO_GENERATED_SRCS}
+  ${OTEL_PROTO_GENERATED_HDRS}
+  ${CUSTOM_PROTO_GENERATED_SRCS}
+  ${CUSTOM_PROTO_GENERATED_HDRS}
+)
 target_link_libraries(otel_proto PUBLIC protobuf::libprotobuf)
-target_include_directories(otel_proto PUBLIC 
+target_include_directories(otel_proto PUBLIC
   ${CMAKE_CURRENT_BINARY_DIR}
   ${OPENTELEMETRY_PROTO_ROOT}
 )
@@ -319,10 +379,9 @@ target_link_libraries(otel_appender PRIVATE
   protobuf::libprotobuf
   otel_proto
   duckdb
+  cppkafka
+  rdkafka::rdkafka
 )
-
-# Link librdkafka (required)
-target_link_libraries(otel_appender PRIVATE rdkafka::rdkafka)
 
 # Include directories for appender
 target_include_directories(otel_appender PRIVATE

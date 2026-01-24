@@ -2,6 +2,7 @@
 #include "ingester/http_server.hpp"
 #include "crow.h"
 #include <zlib.h>
+#include "telemetry_wrapper.pb.h"
 #include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
 
 using opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest;
@@ -282,8 +283,8 @@ TEST_F(HttpServerTest, RejectsUnsupportedMediaType) {
     EXPECT_EQ(res.code, 415);
 }
 
-// Test invalid protobuf payload
-TEST_F(HttpServerTest, RejectsInvalidProtobufPayload) {
+// Test invalid protobuf payload - now accepted (validation deferred to consumer)
+TEST_F(HttpServerTest, AcceptsInvalidProtobufPayload) {
     crow::request req;
     req.url = "/v1/logs";
     req.method = "POST"_method;
@@ -293,12 +294,12 @@ TEST_F(HttpServerTest, RejectsInvalidProtobufPayload) {
     crow::response res;
     app.handle_full(req, res);
 
-    EXPECT_EQ(res.code, 400);
-    EXPECT_EQ(res.body, "Invalid Protobuf payload");
+    // HTTP server no longer validates payload - deferred to consumer
+    EXPECT_EQ(res.code, 200);
 }
 
-// Test invalid JSON payload
-TEST_F(HttpServerTest, RejectsInvalidJsonPayload) {
+// Test invalid JSON payload - now accepted (validation deferred to consumer)
+TEST_F(HttpServerTest, AcceptsInvalidJsonPayload) {
     crow::request req;
     req.url = "/v1/logs";
     req.method = "POST"_method;
@@ -308,8 +309,8 @@ TEST_F(HttpServerTest, RejectsInvalidJsonPayload) {
     crow::response res;
     app.handle_full(req, res);
 
-    EXPECT_EQ(res.code, 400);
-    EXPECT_NE(res.body.find("Invalid JSON payload"), std::string::npos);
+    // HTTP server no longer validates payload - deferred to consumer
+    EXPECT_EQ(res.code, 200);
 }
 
 // Test invalid gzip payload

@@ -3,14 +3,13 @@
 
 #include "../config.hpp"
 #include "log_transformer.hpp"
+#include "duckdb.hpp"
 #include <vector>
 #include <memory>
 #include <string>
 
-// Forward declaration - DuckDB will be included in .cpp
-// This allows compilation even if DuckDB is not available
-class DuckDB;
-class Connection;
+using duckdb::DuckDB;
+using duckdb::Connection;
 
 class IcebergAppender {
 public:

@@ -3,7 +3,7 @@
 #include <sstream>
 #include <iomanip>
 
-#include "duckdb/duckdb.hpp"
+#include "duckdb.hpp"
 
 IcebergAppender::IcebergAppender(const AppenderConfig& config)
     : config_(config), buffer_size_bytes_(0), buffer_records_(0) {

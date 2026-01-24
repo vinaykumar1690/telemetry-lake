@@ -2,7 +2,7 @@
 #define QUEUE_PRODUCER_HPP
 
 #include "../config.hpp"
-#include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
+#include "telemetry_wrapper.pb.h"
 #include <librdkafka/rdkafka.h>
 #include <string>
 #include <atomic>
@@ -50,7 +50,7 @@ public:
 
     // Produce a message to the queue
     // Returns SUCCESS if message was successfully queued
-    ProduceResult produce(const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request);
+    ProduceResult produce(const telemetry::v1::RawTelemetryMessage& message);
 
     // Get current number of in-flight messages
     int getInFlightCount() const { return in_flight_count_.load(); }
@@ -73,7 +73,7 @@ private:
     DeliveryReportCb delivery_cb_;
 
     ProduceResult produceWithRetry(const std::string& serialized_data, int retry_count = 0);
-    std::string serializeRequest(const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request);
+    std::string serializeMessage(const telemetry::v1::RawTelemetryMessage& message);
 };
 
 #endif // QUEUE_PRODUCER_HPP
