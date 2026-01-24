@@ -103,16 +103,16 @@ KAFKA USAGE
 -----------------------------------------------------------------------
 
 Test Kafka connectivity:
-  kubectl exec -n {{ .Values.namespace }} kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+  kubectl exec -n {{ .Values.namespace }} kafka-0 -- /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
 
 Create the telemetry logs topic:
-  kubectl exec -n {{ .Values.namespace }} kafka-0 -- kafka-topics.sh --create --topic {{ .Values.kafka.topics.logs }} --bootstrap-server localhost:9092 --partitions {{ .Values.kafka.config.numPartitions }} --replication-factor {{ .Values.kafka.config.defaultReplicationFactor }}
+  kubectl exec -n {{ .Values.namespace }} kafka-0 -- /opt/kafka/bin/kafka-topics.sh --create --topic {{ .Values.kafka.topics.logs }} --bootstrap-server localhost:9092 --partitions {{ .Values.kafka.config.numPartitions }} --replication-factor {{ .Values.kafka.config.defaultReplicationFactor }}
 
 Produce test messages:
-  kubectl exec -it -n {{ .Values.namespace }} kafka-0 -- kafka-console-producer.sh --topic {{ .Values.kafka.topics.logs }} --bootstrap-server localhost:9092
+  kubectl exec -it -n {{ .Values.namespace }} kafka-0 -- /opt/kafka/bin/kafka-console-producer.sh --topic {{ .Values.kafka.topics.logs }} --bootstrap-server localhost:9092
 
 Consume messages:
-  kubectl exec -it -n {{ .Values.namespace }} kafka-0 -- kafka-console-consumer.sh --topic {{ .Values.kafka.topics.logs }} --from-beginning --bootstrap-server localhost:9092
+  kubectl exec -it -n {{ .Values.namespace }} kafka-0 -- /opt/kafka/bin/kafka-console-consumer.sh --topic {{ .Values.kafka.topics.logs }} --from-beginning --bootstrap-server localhost:9092
 
 {{- end }}
 -----------------------------------------------------------------------

@@ -76,7 +76,7 @@ Kafka provides event streaming for buffering telemetry log events before they ar
 
 | Property | Value |
 |----------|-------|
-| Image | `bitnami/kafka:latest` |
+| Image | `apache/kafka:3.7.0` |
 | Replicas | 1 |
 | Client Port | 9092 |
 | Controller Port | 9093 |
@@ -97,16 +97,16 @@ Kafka provides event streaming for buffering telemetry log events before they ar
 **Usage:**
 ```bash
 # List topics
-kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+kubectl exec -n telemetry-lake kafka-0 -- /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
 
 # Create a topic
-kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --create --topic telemetry-logs --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+kubectl exec -n telemetry-lake kafka-0 -- /opt/kafka/bin/kafka-topics.sh --create --topic telemetry-logs --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
 
 # Produce messages
-kubectl exec -it -n telemetry-lake kafka-0 -- kafka-console-producer.sh --topic telemetry-logs --bootstrap-server localhost:9092
+kubectl exec -it -n telemetry-lake kafka-0 -- /opt/kafka/bin/kafka-console-producer.sh --topic telemetry-logs --bootstrap-server localhost:9092
 
 # Consume messages
-kubectl exec -it -n telemetry-lake kafka-0 -- kafka-console-consumer.sh --topic telemetry-logs --from-beginning --bootstrap-server localhost:9092
+kubectl exec -it -n telemetry-lake kafka-0 -- /opt/kafka/bin/kafka-console-consumer.sh --topic telemetry-logs --from-beginning --bootstrap-server localhost:9092
 ```
 
 ### 2. MinIO (StatefulSet)
@@ -241,7 +241,7 @@ namespace: telemetry-lake
 # Kafka Configuration
 kafka:
   enabled: true
-  image: bitnami/kafka:latest
+  image: apache/kafka:3.7.0
   replicas: 1
   storage: 2Gi
   config:
@@ -333,7 +333,7 @@ kubectl wait --for=condition=ready pod -l app=duckdb -n telemetry-lake --timeout
 
 ```bash
 # Test Kafka
-kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+kubectl exec -n telemetry-lake kafka-0 -- /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
 
 # Test MinIO
 kubectl exec -n telemetry-lake duckdb-0 -- curl -s http://minio:9000/minio/health/live
@@ -419,7 +419,7 @@ nessie-xxxxxxxxxx-xxxxx   1/1     Running   0          5m
 ### Step 2: Verify Kafka is Running
 
 ```bash
-kubectl exec -n telemetry-lake kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+kubectl exec -n telemetry-lake kafka-0 -- /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
 ```
 
 ### Step 3: Verify DuckDB Version
@@ -649,7 +649,7 @@ kubectl exec -n telemetry-lake duckdb-0 -- curl http://nessie:19120/api/v2/confi
 ### Test Kafka Connectivity
 
 ```bash
-kubectl exec -n telemetry-lake kafka-0 -- kafka-broker-api-versions.sh --bootstrap-server localhost:9092
+kubectl exec -n telemetry-lake kafka-0 -- /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092
 ```
 
 ## Cleanup

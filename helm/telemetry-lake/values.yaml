@@ -4,7 +4,7 @@ namespace: telemetry-lake
 # Kafka Configuration
 kafka:
   enabled: true
-  image: bitnami/kafka:latest
+  image: apache/kafka:3.7.0
   replicas: 1
   storage: 2Gi
   # Kafka broker configuration
