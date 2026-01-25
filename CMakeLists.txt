@@ -57,7 +57,7 @@ FetchContent_Declare(
   GIT_TAG v1.14.0
 )
 
-# Find librdkafka for Kafka/Redpanda client (required)
+# Find librdkafka for Kafka client (required)
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
   pkg_check_modules(RDKAFKA rdkafka)

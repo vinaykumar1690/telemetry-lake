@@ -22,8 +22,8 @@ int main() {
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
         std::cerr << "Please set required environment variables:" << std::endl;
-        std::cerr << "  REDPANDA_BROKERS - Comma-separated list of broker addresses" << std::endl;
-        std::cerr << "  REDPANDA_TOPIC - Topic name (optional, defaults to 'otel-logs')" << std::endl;
+        std::cerr << "  KAFKA_BROKERS - Comma-separated list of broker addresses" << std::endl;
+        std::cerr << "  KAFKA_TOPIC - Topic name (optional, defaults to 'otel-logs')" << std::endl;
         return 1;
     }
     return 0;

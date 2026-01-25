@@ -1,0 +1,79 @@
+{{- if .Values.appender.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appender
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: appender
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.appender.replicas }}
+  selector:
+    matchLabels:
+      app: appender
+  template:
+    metadata:
+      labels:
+        app: appender
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: appender
+          image: "{{ .Values.appender.image.repository }}:{{ .Values.appender.image.tag }}"
+          imagePullPolicy: {{ .Values.appender.image.pullPolicy }}
+          env:
+            # Kafka configuration
+            - name: KAFKA_BROKERS
+              value: {{ .Values.appender.kafka.brokers | default (include "telemetry-lake.kafkaBootstrap" .) | quote }}
+            - name: KAFKA_TOPIC
+              value: {{ .Values.appender.kafka.topic | quote }}
+            - name: KAFKA_CONSUMER_GROUP
+              value: {{ .Values.appender.kafka.consumerGroup | quote }}
+            # Iceberg catalog configuration
+            - name: ICEBERG_CATALOG_URI
+              value: {{ .Values.appender.iceberg.catalogUri | default (include "telemetry-lake.nessieEndpoint" .) | quote }}
+            - name: ICEBERG_TABLE_NAME
+              value: {{ .Values.appender.iceberg.tableName | quote }}
+            # S3/MinIO configuration
+            - name: S3_ENDPOINT
+              value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.appender.s3.bucket | quote }}
+            - name: S3_ACCESS_KEY
+              {{- if .Values.appender.s3.accessKeySecret.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appender.s3.accessKeySecret.name }}
+                  key: {{ .Values.appender.s3.accessKeySecret.key }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: access-key
+              {{- end }}
+            - name: S3_SECRET_KEY
+              {{- if .Values.appender.s3.secretKeySecret.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appender.s3.secretKeySecret.name }}
+                  key: {{ .Values.appender.s3.secretKeySecret.key }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: secret-key
+              {{- end }}
+            # Buffer configuration
+            - name: BUFFER_SIZE_MB
+              value: {{ .Values.appender.buffer.sizeMB | quote }}
+            - name: BUFFER_TIME_SECONDS
+              value: {{ .Values.appender.buffer.timeSeconds | quote }}
+            # Dead letter queue (optional)
+            {{- if .Values.appender.dlqPath }}
+            - name: DLQ_PATH
+              value: {{ .Values.appender.dlqPath | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.appender.resources | nindent 12 }}
+{{- end }}

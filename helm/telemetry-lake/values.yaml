@@ -71,3 +71,92 @@ duckdb:
     limits:
       memory: "2Gi"
       cpu: "1000m"
+
+# Ingester Configuration (HTTP receiver -> Kafka producer)
+ingester:
+  enabled: true
+  # Container image (will be built from this codebase)
+  image:
+    repository: telemetry-lake/ingester
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 4318
+  # Kafka producer settings
+  kafka:
+    # Broker address - uses Kafka service from this chart
+    # Override for external Kafka: "kafka.external.svc:9092"
+    brokers: ""  # Defaults to kafka.<namespace>.svc.cluster.local:9092
+    topic: "telemetry-logs"
+    # Producer tuning
+    maxInFlight: 1000
+    acks: -1  # -1=all, 1=leader, 0=none
+    compression: "snappy"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  # Liveness and readiness probes
+  probes:
+    liveness:
+      path: /health
+      port: 4318
+      initialDelaySeconds: 10
+      periodSeconds: 10
+    readiness:
+      path: /ready
+      port: 4318
+      initialDelaySeconds: 5
+      periodSeconds: 5
+
+# Appender Configuration (Kafka consumer -> Iceberg writer)
+appender:
+  enabled: true
+  # Container image (will be built from this codebase)
+  image:
+    repository: telemetry-lake/appender
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  # Kafka consumer settings
+  kafka:
+    # Broker address - uses Kafka service from this chart
+    brokers: ""  # Defaults to kafka.<namespace>.svc.cluster.local:9092
+    topic: "telemetry-logs"
+    consumerGroup: "otel-appender"
+  # Iceberg catalog settings
+  iceberg:
+    # Catalog URI - uses Nessie service from this chart
+    catalogUri: ""  # Defaults to http://nessie.<namespace>.svc.cluster.local:19120/api/v1
+    tableName: "logs"
+  # S3/MinIO storage settings
+  s3:
+    # Endpoint - uses MinIO service from this chart
+    endpoint: ""  # Defaults to http://minio.<namespace>.svc.cluster.local:9000
+    bucket: "telemetrylake"
+    # Credentials - reference secrets or use values from minio config
+    accessKeySecret:
+      name: ""  # If empty, uses minio.accessKey from values
+      key: "access-key"
+    secretKeySecret:
+      name: ""  # If empty, uses minio.secretKey from values
+      key: "secret-key"
+  # Buffer settings for batching writes
+  buffer:
+    sizeMB: 100
+    timeSeconds: 300
+  # Dead letter queue path (optional, empty to disable)
+  dlqPath: ""
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"

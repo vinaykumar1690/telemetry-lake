@@ -6,6 +6,12 @@
 Namespace: {{ .Values.namespace }}
 
 Components:
+{{- if .Values.ingester.enabled }}
+  - Ingester (HTTP receiver for OTLP logs -> Kafka producer)
+{{- end }}
+{{- if .Values.appender.enabled }}
+  - Appender (Kafka consumer -> Iceberg writer)
+{{- end }}
 {{- if .Values.kafka.enabled }}
   - Kafka (Event streaming for log buffering)
 {{- end }}
@@ -23,6 +29,12 @@ kubectl wait --for=condition=ready pod -l app=kafka -n {{ .Values.namespace }} -
 kubectl wait --for=condition=ready pod -l app=minio -n {{ .Values.namespace }} --timeout=120s
 kubectl wait --for=condition=ready pod -l app=nessie -n {{ .Values.namespace }} --timeout=120s
 kubectl wait --for=condition=ready pod -l app=duckdb -n {{ .Values.namespace }} --timeout=120s
+{{- if .Values.ingester.enabled }}
+kubectl wait --for=condition=ready pod -l app=ingester -n {{ .Values.namespace }} --timeout=120s
+{{- end }}
+{{- if .Values.appender.enabled }}
+kubectl wait --for=condition=ready pod -l app=appender -n {{ .Values.namespace }} --timeout=120s
+{{- end }}
 
 -----------------------------------------------------------------------
 ACCESS DUCKDB
@@ -78,6 +90,9 @@ Once inside DuckDB, run these commands:
 SERVICE ENDPOINTS (Internal)
 -----------------------------------------------------------------------
 
+{{- if .Values.ingester.enabled }}
+Ingester OTLP:     http://ingester:{{ .Values.ingester.service.port }}/v1/logs
+{{- end }}
 {{- if .Values.kafka.enabled }}
 Kafka Bootstrap:   kafka:9092
 Kafka Topic:       {{ .Values.kafka.topics.logs }}
@@ -97,6 +112,22 @@ Access MinIO Console from your browser:
 Then open: http://localhost:9001
 Credentials: {{ .Values.minio.accessKey }} / {{ .Values.minio.secretKey }}
 
+{{- if .Values.ingester.enabled }}
+-----------------------------------------------------------------------
+SEND TELEMETRY LOGS
+-----------------------------------------------------------------------
+
+Send OTLP logs to the ingester from within the cluster:
+
+  curl -X POST http://ingester:{{ .Values.ingester.service.port }}/v1/logs \
+    -H "Content-Type: application/json" \
+    -d '{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"test"}}]},"scopeLogs":[{"scope":{},"logRecords":[{"timeUnixNano":"1672531200000000000","severityText":"INFO","body":{"stringValue":"Hello from K8s"}}]}]}]}'
+
+Port forward to send logs from your local machine:
+
+  kubectl port-forward -n {{ .Values.namespace }} svc/ingester {{ .Values.ingester.service.port }}:{{ .Values.ingester.service.port }}
+
+{{- end }}
 {{- if .Values.kafka.enabled }}
 -----------------------------------------------------------------------
 KAFKA USAGE
@@ -123,6 +154,12 @@ Check pod status:
   kubectl get pods -n {{ .Values.namespace }}
 
 View logs:
+{{- if .Values.ingester.enabled }}
+  kubectl logs -n {{ .Values.namespace }} -l app=ingester
+{{- end }}
+{{- if .Values.appender.enabled }}
+  kubectl logs -n {{ .Values.namespace }} -l app=appender
+{{- end }}
 {{- if .Values.kafka.enabled }}
   kubectl logs -n {{ .Values.namespace }} kafka-0
 {{- end }}

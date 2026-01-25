@@ -1,0 +1,56 @@
+{{- if .Values.ingester.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingester
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ingester
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ingester.replicas }}
+  selector:
+    matchLabels:
+      app: ingester
+  template:
+    metadata:
+      labels:
+        app: ingester
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: ingester
+          image: "{{ .Values.ingester.image.repository }}:{{ .Values.ingester.image.tag }}"
+          imagePullPolicy: {{ .Values.ingester.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 4318
+              protocol: TCP
+          env:
+            # Kafka configuration
+            - name: KAFKA_BROKERS
+              value: {{ .Values.ingester.kafka.brokers | default (include "telemetry-lake.kafkaBootstrap" .) | quote }}
+            - name: KAFKA_TOPIC
+              value: {{ .Values.ingester.kafka.topic | quote }}
+            # Producer tuning
+            - name: MAX_IN_FLIGHT
+              value: {{ .Values.ingester.kafka.maxInFlight | quote }}
+            - name: PRODUCER_ACKS
+              value: {{ .Values.ingester.kafka.acks | quote }}
+            - name: PRODUCER_COMPRESSION
+              value: {{ .Values.ingester.kafka.compression | quote }}
+          resources:
+            {{- toYaml .Values.ingester.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.ingester.probes.liveness.path }}
+              port: {{ .Values.ingester.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.ingester.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ingester.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.ingester.probes.readiness.path }}
+              port: {{ .Values.ingester.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.ingester.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ingester.probes.readiness.periodSeconds }}
+{{- end }}

@@ -16,14 +16,14 @@ struct IngesterConfig {
 
     static IngesterConfig fromEnv() {
         IngesterConfig config;
-        
-        const char* brokers = std::getenv("REDPANDA_BROKERS");
+
+        const char* brokers = std::getenv("KAFKA_BROKERS");
         if (!brokers || strlen(brokers) == 0) {
-            throw std::runtime_error("REDPANDA_BROKERS environment variable is required");
+            throw std::runtime_error("KAFKA_BROKERS environment variable is required");
         }
         config.queue_brokers = brokers;
 
-        const char* topic = std::getenv("REDPANDA_TOPIC");
+        const char* topic = std::getenv("KAFKA_TOPIC");
         if (!topic || strlen(topic) == 0) {
             config.queue_topic = "otel-logs";  // default
         } else {
@@ -64,21 +64,21 @@ struct AppenderConfig {
 
     static AppenderConfig fromEnv() {
         AppenderConfig config;
-        
-        const char* brokers = std::getenv("REDPANDA_BROKERS");
+
+        const char* brokers = std::getenv("KAFKA_BROKERS");
         if (!brokers || strlen(brokers) == 0) {
-            throw std::runtime_error("REDPANDA_BROKERS environment variable is required");
+            throw std::runtime_error("KAFKA_BROKERS environment variable is required");
         }
         config.queue_brokers = brokers;
 
-        const char* topic = std::getenv("REDPANDA_TOPIC");
+        const char* topic = std::getenv("KAFKA_TOPIC");
         if (!topic || strlen(topic) == 0) {
             config.queue_topic = "otel-logs";  // default
         } else {
             config.queue_topic = topic;
         }
 
-        const char* consumer_group = std::getenv("CONSUMER_GROUP");
+        const char* consumer_group = std::getenv("KAFKA_CONSUMER_GROUP");
         if (consumer_group) {
             config.consumer_group = consumer_group;
         }

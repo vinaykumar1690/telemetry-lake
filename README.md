@@ -1,26 +1,26 @@
 # Telemetry Lake
 
-A high-performance C++ telemetry ingestion pipeline that receives OpenTelemetry (OTel) logs via HTTP and writes them to Apache Iceberg tables. The system uses Kafka/Redpanda as a message queue for reliable, scalable log processing.
+A high-performance C++ telemetry ingestion pipeline that receives OpenTelemetry (OTel) logs via HTTP and writes them to Apache Iceberg tables. The system uses Apache Kafka as a message queue for reliable, scalable log processing.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────────┐     ┌─────────────┐
-│ OTel Agent  │────▶│ otel_receiver│────▶│ Kafka/Redpanda │────▶│ otel_appender│
-│ (HTTP POST) │     │ (port 4318) │     │                 │     │             │
-└─────────────┘     └─────────────┘     └─────────────────┘     └──────┬──────┘
-                                                                       │
-                                                                       ▼
-                                                                ┌─────────────┐
-                                                                │   Iceberg   │
-                                                                │   (S3/MinIO)│
-                                                                └─────────────┘
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ OTel Agent  │────▶│  Ingester   │────▶│    Kafka    │────▶│   Appender  │
+│ (HTTP POST) │     │ (port 4318) │     │             │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘     └──────┬──────┘
+                                                                   │
+                                                                   ▼
+                                                            ┌─────────────┐
+                                                            │   Iceberg   │
+                                                            │   (S3/MinIO)│
+                                                            └─────────────┘
 ```
 
 ## Components
 
-- **otel_receiver**: HTTP server that accepts OTLP logs and produces to Kafka
-- **otel_appender**: Kafka consumer that transforms logs and writes to Iceberg
+- **Ingester** (`otel_receiver`): HTTP server that accepts OTLP logs and produces to Kafka
+- **Appender** (`otel_appender`): Kafka consumer that transforms logs and writes to Iceberg
 
 ## Dependencies
 
@@ -109,43 +109,43 @@ make -j$(nproc)
 
 Both components are configured via environment variables.
 
-### otel_receiver (Ingester)
+### Ingester (otel_receiver)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDPANDA_BROKERS` | `localhost:9092` | Kafka/Redpanda broker addresses |
-| `REDPANDA_TOPIC` | `otel-logs` | Topic to produce messages to |
+| `KAFKA_BROKERS` | (required) | Kafka broker addresses (e.g., `kafka:9092`) |
+| `KAFKA_TOPIC` | `otel-logs` | Topic to produce messages to |
 | `MAX_IN_FLIGHT` | `1000` | Max pending messages before backpressure |
 | `PRODUCER_ACKS` | `-1` | Acks required (-1=all, 1=leader, 0=none) |
 | `PRODUCER_COMPRESSION` | `snappy` | Compression type (snappy/gzip/lz4/zstd) |
 
-### otel_appender (Consumer)
+### Appender (otel_appender)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDPANDA_BROKERS` | `localhost:9092` | Kafka/Redpanda broker addresses |
-| `REDPANDA_TOPIC` | `otel-logs` | Topic to consume from |
-| `CONSUMER_GROUP` | `otel-appender` | Kafka consumer group ID |
-| `ICEBERG_CATALOG_URI` | - | Nessie/Iceberg REST catalog URL |
-| `S3_ENDPOINT` | - | S3/MinIO endpoint URL |
-| `S3_ACCESS_KEY` | - | S3 access key |
-| `S3_SECRET_KEY` | - | S3 secret key |
-| `S3_BUCKET` | - | S3 bucket for Iceberg data |
+| `KAFKA_BROKERS` | (required) | Kafka broker addresses (e.g., `kafka:9092`) |
+| `KAFKA_TOPIC` | `otel-logs` | Topic to consume from |
+| `KAFKA_CONSUMER_GROUP` | `otel-appender` | Kafka consumer group ID |
+| `ICEBERG_CATALOG_URI` | (required) | Nessie/Iceberg REST catalog URL |
+| `S3_ENDPOINT` | (required) | S3/MinIO endpoint URL |
+| `S3_ACCESS_KEY` | (required) | S3 access key |
+| `S3_SECRET_KEY` | (required) | S3 secret key |
+| `S3_BUCKET` | (required) | S3 bucket for Iceberg data |
 | `ICEBERG_TABLE_NAME` | `logs` | Iceberg table name |
 | `BUFFER_SIZE_MB` | `100` | Buffer size before flush (MB) |
 | `BUFFER_TIME_SECONDS` | `300` | Max time before flush (seconds) |
-| `DLQ_PATH` | - | Dead letter queue file path (optional) |
+| `DLQ_PATH` | (optional) | Dead letter queue file path |
 
 ## How to Run
 
-### Start the Receiver
+### Start the Ingester
 
 ```bash
-# With default settings (requires Kafka on localhost:9092)
-./otel_receiver
+# With required environment variables
+KAFKA_BROKERS=localhost:9092 ./otel_receiver
 
-# With custom broker
-REDPANDA_BROKERS=kafka.example.com:9092 ./otel_receiver
+# With custom topic
+KAFKA_BROKERS=kafka:9092 KAFKA_TOPIC=telemetry-logs ./otel_receiver
 ```
 
 Output:
@@ -158,7 +158,8 @@ OTel Log Receiver is running at http://0.0.0.0:4318
 
 ```bash
 # Configure and run
-export REDPANDA_BROKERS=localhost:9092
+export KAFKA_BROKERS=localhost:9092
+export KAFKA_TOPIC=otel-logs
 export ICEBERG_CATALOG_URI=http://localhost:8181
 export S3_ENDPOINT=http://localhost:9000
 export S3_ACCESS_KEY=minioadmin

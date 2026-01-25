@@ -116,9 +116,9 @@ int main() {
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
         std::cerr << "Please set required environment variables:" << std::endl;
-        std::cerr << "  REDPANDA_BROKERS - Comma-separated list of broker addresses" << std::endl;
-        std::cerr << "  REDPANDA_TOPIC - Topic name (optional, defaults to 'otel-logs')" << std::endl;
-        std::cerr << "  CONSUMER_GROUP - Consumer group name (optional, defaults to 'otel-appender')" << std::endl;
+        std::cerr << "  KAFKA_BROKERS - Comma-separated list of broker addresses" << std::endl;
+        std::cerr << "  KAFKA_TOPIC - Topic name (optional, defaults to 'otel-logs')" << std::endl;
+        std::cerr << "  KAFKA_CONSUMER_GROUP - Consumer group name (optional, defaults to 'otel-appender')" << std::endl;
         std::cerr << "  ICEBERG_CATALOG_URI - Iceberg REST catalog URI" << std::endl;
         std::cerr << "  S3_ENDPOINT - S3-compatible storage endpoint" << std::endl;
         std::cerr << "  S3_ACCESS_KEY - S3 access key" << std::endl;

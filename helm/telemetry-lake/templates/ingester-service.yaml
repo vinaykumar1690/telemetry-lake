@@ -1,0 +1,19 @@
+{{- if .Values.ingester.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingester
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ingester
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.ingester.service.type }}
+  ports:
+    - port: {{ .Values.ingester.service.port }}
+      targetPort: 4318
+      protocol: TCP
+      name: http
+  selector:
+    app: ingester
+{{- end }}
