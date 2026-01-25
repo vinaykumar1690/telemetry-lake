@@ -1,0 +1,32 @@
+# Build directories
+build/
+cmake-build-*/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+*.md
+LICENSE
+
+# Helm charts (not needed for building images)
+helm/
+
+# Docker files (avoid recursive inclusion)
+docker/
+
+# Tests are needed for CMake configuration
+# tests/
+
+# Temporary files
+*.log
+*.tmp

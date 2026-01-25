@@ -124,13 +124,6 @@ if(NOT RDKAFKA_FOUND)
   message(FATAL_ERROR "librdkafka is required but not found. Please install it via: brew install librdkafka (macOS) or apt-get install librdkafka-dev (Linux)")
 endif()
 
-# Fetch DuckDB
-FetchContent_Declare(
-  duckdb
-  GIT_REPOSITORY https://github.com/duckdb/duckdb.git
-  GIT_TAG v1.0.0
-)
-
 # Fetch cppkafka (C++ wrapper for librdkafka)
 FetchContent_Declare(
   cppkafka
@@ -139,11 +132,48 @@ FetchContent_Declare(
 )
 
 # Make dependencies available (librdkafka must be found before cppkafka)
-FetchContent_MakeAvailable(Crow protobuf opentelemetry_proto googletest duckdb cppkafka)
+FetchContent_MakeAvailable(Crow protobuf opentelemetry_proto googletest cppkafka)
 
-# Configure DuckDB
-set(DUCKDB_BUILD_EXTENSIONS ON CACHE BOOL "" FORCE)
-set(DUCKDB_EXTENSION_DIRECTORIES "${duckdb_SOURCE_DIR}/extensions" CACHE STRING "" FORCE)
+# Find pre-built DuckDB library
+# DuckDB binary distribution should be installed to /usr/local or specified via DUCKDB_ROOT
+set(DUCKDB_ROOT "" CACHE PATH "Path to DuckDB installation")
+
+# Search for DuckDB library
+find_library(DUCKDB_LIBRARY
+  NAMES duckdb
+  PATHS
+    ${DUCKDB_ROOT}/lib
+    ${DUCKDB_ROOT}
+    /usr/local/lib
+    /usr/lib
+    /opt/homebrew/lib
+)
+
+# Search for DuckDB headers
+find_path(DUCKDB_INCLUDE_DIR
+  NAMES duckdb.hpp
+  PATHS
+    ${DUCKDB_ROOT}/include
+    ${DUCKDB_ROOT}
+    /usr/local/include
+    /usr/include
+    /opt/homebrew/include
+)
+
+if(NOT DUCKDB_LIBRARY OR NOT DUCKDB_INCLUDE_DIR)
+  message(FATAL_ERROR "DuckDB library not found. Please install libduckdb or set DUCKDB_ROOT. "
+    "Download from: https://github.com/duckdb/duckdb/releases")
+endif()
+
+message(STATUS "Found DuckDB library: ${DUCKDB_LIBRARY}")
+message(STATUS "Found DuckDB headers: ${DUCKDB_INCLUDE_DIR}")
+
+# Create imported target for DuckDB
+add_library(duckdb SHARED IMPORTED)
+set_target_properties(duckdb PROPERTIES
+  IMPORTED_LOCATION "${DUCKDB_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${DUCKDB_INCLUDE_DIR}"
+)
 
 # Set up OpenTelemetry protobuf compilation
 set(OPENTELEMETRY_PROTO_ROOT ${opentelemetry_proto_SOURCE_DIR})
@@ -387,7 +417,7 @@ target_link_libraries(otel_appender PRIVATE
 target_include_directories(otel_appender PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${protobuf_SOURCE_DIR}/src
-  ${duckdb_SOURCE_DIR}/src/include
+  ${DUCKDB_INCLUDE_DIR}
   ${cppkafka_SOURCE_DIR}/include
 )
 

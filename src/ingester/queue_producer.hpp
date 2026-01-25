@@ -60,6 +60,11 @@ public:
         return in_flight_count_.load() >= config_.max_in_flight;
     }
 
+    // Check if the producer is initialized and ready to accept messages
+    bool isReady() const {
+        return producer_ != nullptr && topic_ != nullptr;
+    }
+
     // Shutdown gracefully
     void shutdown();
 

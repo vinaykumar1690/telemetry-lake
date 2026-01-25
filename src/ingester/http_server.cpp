@@ -57,6 +57,23 @@ static inline std::string to_lower_trimmed(const std::string &s) {
 
 void HttpServer::setupRoutes(crow::SimpleApp& app) {
     auto queue_producer = queue_producer_;  // Capture for lambda
+
+    // Health check endpoint for Kubernetes liveness probe
+    CROW_ROUTE(app, "/health")
+        ([](){
+            return crow::response(200, "OK");
+        });
+
+    // Readiness check endpoint for Kubernetes readiness probe
+    CROW_ROUTE(app, "/ready")
+        ([queue_producer](){
+            // Check if queue producer is initialized and ready
+            if (queue_producer && !queue_producer->isReady()) {
+                return crow::response(503, "Queue producer not ready");
+            }
+            return crow::response(200, "OK");
+        });
+
     CROW_ROUTE(app, "/v1/logs")
         .methods("POST"_method)
         ([queue_producer](const crow::request& req){
