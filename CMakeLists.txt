@@ -6,12 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Fetch Crow web framework
-FetchContent_Declare(
-  Crow
-  GIT_REPOSITORY https://github.com/CrowCpp/Crow.git
-  GIT_TAG v1.3.0.0
-)
+# Find Crow web framework (header-only, install via: brew install crow)
+# Note: Crow 1.3.0 is expected but CrowConfig.cmake doesn't export version info
+find_package(Crow REQUIRED)
 
 # Fetch Protocol Buffers
 FetchContent_Declare(
@@ -20,6 +17,10 @@ FetchContent_Declare(
   GIT_TAG v25.3
 )
 
+# Configure protobuf before making it available
+set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
+
 # Fetch OpenTelemetry Protocol Buffers definitions
 FetchContent_Declare(
   opentelemetry_proto
@@ -27,9 +28,6 @@ FetchContent_Declare(
   GIT_TAG v1.3.1
 )
 
-# Configure protobuf before making it available
-set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
 
 # Find or fetch zlib for gzip decompression
 find_package(ZLIB QUIET)
@@ -50,12 +48,9 @@ if(NOT ZLIB_FOUND)
   endif()
 endif()
 
-# Fetch Google Test
-FetchContent_Declare(
-  googletest
-  GIT_REPOSITORY https://github.com/google/googletest.git
-  GIT_TAG v1.14.0
-)
+# Find Google Test (install via: brew install googletest)
+# Note: GoogleTest 1.17.0 expected from system
+find_package(GTest REQUIRED)
 
 # Find librdkafka for Kafka client (required)
 find_package(PkgConfig QUIET)
@@ -132,7 +127,7 @@ FetchContent_Declare(
 )
 
 # Make dependencies available (librdkafka must be found before cppkafka)
-FetchContent_MakeAvailable(Crow protobuf opentelemetry_proto googletest cppkafka)
+FetchContent_MakeAvailable(protobuf opentelemetry_proto cppkafka)
 
 # Find pre-built DuckDB library
 # DuckDB binary distribution should be installed to /usr/local or specified via DUCKDB_ROOT
@@ -161,19 +156,22 @@ find_path(DUCKDB_INCLUDE_DIR
 )
 
 if(NOT DUCKDB_LIBRARY OR NOT DUCKDB_INCLUDE_DIR)
-  message(FATAL_ERROR "DuckDB library not found. Please install libduckdb or set DUCKDB_ROOT. "
+  message(WARNING "DuckDB library not found. otel_appender target will not be built. "
+    "To build appender, install libduckdb or set DUCKDB_ROOT. "
     "Download from: https://github.com/duckdb/duckdb/releases")
+  set(DUCKDB_FOUND FALSE)
+else()
+  set(DUCKDB_FOUND TRUE)
+  message(STATUS "Found DuckDB library: ${DUCKDB_LIBRARY}")
+  message(STATUS "Found DuckDB headers: ${DUCKDB_INCLUDE_DIR}")
+
+  # Create imported target for DuckDB
+  add_library(duckdb SHARED IMPORTED)
+  set_target_properties(duckdb PROPERTIES
+    IMPORTED_LOCATION "${DUCKDB_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${DUCKDB_INCLUDE_DIR}"
+  )
 endif()
-
-message(STATUS "Found DuckDB library: ${DUCKDB_LIBRARY}")
-message(STATUS "Found DuckDB headers: ${DUCKDB_INCLUDE_DIR}")
-
-# Create imported target for DuckDB
-add_library(duckdb SHARED IMPORTED)
-set_target_properties(duckdb PROPERTIES
-  IMPORTED_LOCATION "${DUCKDB_LIBRARY}"
-  INTERFACE_INCLUDE_DIRECTORIES "${DUCKDB_INCLUDE_DIR}"
-)
 
 # Set up OpenTelemetry protobuf compilation
 set(OPENTELEMETRY_PROTO_ROOT ${opentelemetry_proto_SOURCE_DIR})
@@ -322,8 +320,8 @@ target_include_directories(otel_proto PUBLIC
 add_executable(otel_receiver src/main.cpp src/ingester/http_server.cpp src/config.cpp src/ingester/queue_producer.cpp)
 
 # Link libraries
-target_link_libraries(otel_receiver PUBLIC 
-  Crow
+target_link_libraries(otel_receiver PUBLIC
+  Crow::Crow
   protobuf::libprotobuf
   otel_proto
   ZLIB::ZLIB
@@ -353,7 +351,7 @@ target_link_libraries(http_server_test PRIVATE
   GTest::gtest
   GTest::gtest_main
   GTest::gmock
-  Crow
+  Crow::Crow
   protobuf::libprotobuf
   otel_proto
   ZLIB::ZLIB
@@ -387,37 +385,39 @@ target_link_libraries(log_transformer_test PRIVATE
   protobuf::libprotobuf
   otel_proto
 )
-target_include_directories(log_transformer_test PRIVATE 
+target_include_directories(log_transformer_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${protobuf_SOURCE_DIR}/src
 )
 add_test(NAME LogTransformerTest COMMAND log_transformer_test)
 
-# Create appender executable
-add_executable(otel_appender 
-  src/appender/main.cpp
-  src/appender/queue_consumer.cpp
-  src/appender/log_transformer.cpp
-  src/appender/iceberg_appender.cpp
-  src/appender/buffer_manager.cpp
-  src/appender/dead_letter_queue.cpp
-  src/config.cpp
-)
+# Create appender executable (only if DuckDB is found)
+if(DUCKDB_FOUND)
+  add_executable(otel_appender
+    src/appender/main.cpp
+    src/appender/queue_consumer.cpp
+    src/appender/log_transformer.cpp
+    src/appender/iceberg_appender.cpp
+    src/appender/buffer_manager.cpp
+    src/appender/dead_letter_queue.cpp
+    src/config.cpp
+  )
 
-# Link libraries for appender
-target_link_libraries(otel_appender PRIVATE
-  protobuf::libprotobuf
-  otel_proto
-  duckdb
-  cppkafka
-  rdkafka::rdkafka
-)
+  # Link libraries for appender
+  target_link_libraries(otel_appender PRIVATE
+    protobuf::libprotobuf
+    otel_proto
+    duckdb
+    cppkafka
+    rdkafka::rdkafka
+  )
 
-# Include directories for appender
-target_include_directories(otel_appender PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${protobuf_SOURCE_DIR}/src
-  ${DUCKDB_INCLUDE_DIR}
-  ${cppkafka_SOURCE_DIR}/include
-)
+  # Include directories for appender
+  target_include_directories(otel_appender PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${protobuf_SOURCE_DIR}/src
+    ${DUCKDB_INCLUDE_DIR}
+    ${cppkafka_SOURCE_DIR}/include
+  )
+endif()
 

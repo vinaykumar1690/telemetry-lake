@@ -13,9 +13,21 @@ RUN apt-get update && apt-get install -y \
     libasio-dev \
     zlib1g-dev \
     libssl-dev \
+    libgtest-dev \
+    libgmock-dev \
     curl \
     unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Download and install Crow (header-only library with CMake config)
+ARG CROW_VERSION=1.3.0
+RUN curl -L -o /tmp/crow.tar.gz \
+    "https://github.com/CrowCpp/Crow/releases/download/v${CROW_VERSION}/Crow-${CROW_VERSION}-Linux.tar.gz" \
+    && tar -xzf /tmp/crow.tar.gz -C /tmp \
+    && cp -r /tmp/Crow-${CROW_VERSION}-Linux/include/* /usr/local/include/ \
+    && mkdir -p /usr/local/lib/cmake \
+    && cp -r /tmp/Crow-${CROW_VERSION}-Linux/lib/cmake/* /usr/local/lib/cmake/ \
+    && rm -rf /tmp/crow.tar.gz /tmp/Crow-${CROW_VERSION}-Linux
 
 # Download and install pre-built DuckDB library
 ARG DUCKDB_VERSION=v1.4.3
@@ -37,6 +49,7 @@ COPY tests/ tests/
 # Build the appender executable
 RUN cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/usr/local \
     -DDUCKDB_ROOT=/usr/local \
     && cmake --build build --target otel_appender -j$(nproc)
 
