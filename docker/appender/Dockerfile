@@ -75,8 +75,12 @@ RUN curl -L -o /tmp/libduckdb.zip \
     && rm -rf /tmp/libduckdb.zip /tmp/duckdb \
     && apt-get purge -y curl unzip && apt-get autoremove -y
 
-# Copy the built executable
+# Copy the built executable and cppkafka library
 COPY --from=builder /build/build/otel_appender /usr/local/bin/
+COPY --from=builder /build/build/_deps/cppkafka-build/lib/libcppkafka.so* /usr/local/lib/
+
+# Update library cache
+RUN ldconfig
 
 # Create non-root user
 RUN useradd -r -s /bin/false appender
