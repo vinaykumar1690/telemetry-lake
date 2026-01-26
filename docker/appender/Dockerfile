@@ -82,9 +82,13 @@ COPY --from=builder /build/build/_deps/cppkafka-build/lib/libcppkafka.so* /usr/l
 # Update library cache
 RUN ldconfig
 
-# Create non-root user
-RUN useradd -r -s /bin/false appender
+# Create non-root user with home directory for DuckDB extensions
+RUN useradd -r -s /bin/false -m -d /home/appender appender && \
+    mkdir -p /home/appender/.duckdb && \
+    chown -R appender:appender /home/appender
+
 USER appender
+ENV HOME=/home/appender
 
 # Default command
 ENTRYPOINT ["/usr/local/bin/otel_appender"]
