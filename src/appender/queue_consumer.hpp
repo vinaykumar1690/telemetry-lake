@@ -5,6 +5,8 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <map>
+#include <cstdint>
 
 // Forward declarations
 namespace opentelemetry {
@@ -29,9 +31,18 @@ using opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest;
 
 #include <cppkafka/cppkafka.h>
 
+// Kafka message metadata passed to callback
+struct KafkaMessageMeta {
+    std::string topic;
+    int32_t partition;
+    int64_t offset;
+};
+
 class QueueConsumer {
 public:
-    using MessageCallback = std::function<void(const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest&)>;
+    using MessageCallback = std::function<void(
+        const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest&,
+        const KafkaMessageMeta&)>;
 
     QueueConsumer(const AppenderConfig& config);
     ~QueueConsumer();
@@ -40,7 +51,7 @@ public:
     bool initialize();
 
     // Start consuming messages
-    // Calls callback for each message received
+    // Calls callback for each message received with Kafka metadata
     void start(MessageCallback callback);
 
     // Stop consuming (graceful shutdown)
@@ -49,12 +60,33 @@ public:
     // Check if consumer is running
     bool isRunning() const { return running_; }
 
+    // Track offset for a partition (called after successful processing)
+    void trackOffset(int32_t partition, int64_t offset);
+
+    // Get pending offsets per partition
+    std::map<int32_t, int64_t> getPendingOffsets() const;
+
+    // Commit all pending offsets to Kafka
+    bool commitPendingOffsets();
+
+    // Clear pending offsets (call after successful commit)
+    void clearPendingOffsets();
+
+    // Seek consumer to specific offsets per partition (for recovery)
+    bool seekToOffsets(const std::map<int32_t, int64_t>& offsets);
+
+    // Get the configured topic name
+    const std::string& getTopic() const { return config_.queue_topic; }
+
 private:
     AppenderConfig config_;
     bool running_;
 
     std::unique_ptr<cppkafka::Consumer> consumer_;
     std::unique_ptr<cppkafka::Configuration> kafka_config_;
+
+    // Pending offsets per partition (max offset seen for each partition)
+    std::map<int32_t, int64_t> pending_offsets_;
 
     // Deserialize wrapper message from queue
     telemetry::v1::RawTelemetryMessage deserializeWrapper(const std::string& data);

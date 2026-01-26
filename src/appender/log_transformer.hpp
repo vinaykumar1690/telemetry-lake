@@ -9,6 +9,12 @@
 
 // Represents a single transformed log record ready for insertion into Iceberg
 struct TransformedLogRecord {
+    // Kafka source metadata (for exactly-once semantics)
+    std::string kafka_topic;
+    int32_t kafka_partition;
+    int64_t kafka_offset;
+
+    // Log record fields
     std::chrono::system_clock::time_point timestamp;
     std::string severity;
     std::string body;
@@ -24,8 +30,12 @@ class LogTransformer {
 public:
     // Transform an ExportLogsServiceRequest into a vector of TransformedLogRecord
     // Each log record in the request becomes one TransformedLogRecord
+    // The Kafka metadata is propagated to each record for exactly-once semantics
     static std::vector<TransformedLogRecord> transform(
-        const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request);
+        const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request,
+        const std::string& kafka_topic,
+        int32_t kafka_partition,
+        int64_t kafka_offset);
 
 private:
     // Extract a string value from an AnyValue

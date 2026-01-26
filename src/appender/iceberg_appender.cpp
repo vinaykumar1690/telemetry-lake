@@ -115,8 +115,12 @@ bool IcebergAppender::createStagingTable() {
     try {
         // Create a local in-memory table for buffering records
         // DuckDB can handle tens of thousands of inserts per second
+        // Includes Kafka metadata columns for exactly-once semantics
         std::string create_sql = R"(
             CREATE TABLE local_buffer (
+                _kafka_topic VARCHAR,
+                _kafka_partition INTEGER,
+                _kafka_offset BIGINT,
                 timestamp TIMESTAMP,
                 severity VARCHAR,
                 body VARCHAR,
@@ -153,8 +157,12 @@ bool IcebergAppender::createTableIfNotExists() {
         }
 
         // Create Iceberg table using the attached catalog
+        // Includes Kafka metadata columns for exactly-once semantics
         std::ostringstream create_sql;
         create_sql << "CREATE TABLE IF NOT EXISTS " << full_table_name_ << " (\n"
+                   << "  _kafka_topic VARCHAR,\n"
+                   << "  _kafka_partition INTEGER,\n"
+                   << "  _kafka_offset BIGINT,\n"
                    << "  timestamp TIMESTAMP,\n"
                    << "  severity VARCHAR,\n"
                    << "  body VARCHAR,\n"
@@ -193,9 +201,10 @@ bool IcebergAppender::append(const std::vector<TransformedLogRecord>& records) {
         return false;
     }
 
-    // Track buffer size
+    // Track buffer size (including Kafka metadata)
     for (const auto& record : records) {
-        buffer_size_bytes_ += record.body.size() + record.severity.size() +
+        buffer_size_bytes_ += record.kafka_topic.size() + sizeof(record.kafka_partition) +
+                             sizeof(record.kafka_offset) + record.body.size() + record.severity.size() +
                              record.service_name.size() + record.deployment_environment.size() +
                              record.host_name.size() + record.trace_id.size() + record.span_id.size();
         for (const auto& attr : record.attributes) {
@@ -218,6 +227,7 @@ bool IcebergAppender::append(const std::vector<TransformedLogRecord>& records) {
 bool IcebergAppender::insertToStagingTable(const std::vector<TransformedLogRecord>& records) {
     try {
         // Build INSERT statement with VALUES for batch insert
+        // Includes Kafka metadata columns for exactly-once semantics
         std::ostringstream sql;
         sql << "INSERT INTO local_buffer VALUES ";
 
@@ -229,6 +239,9 @@ bool IcebergAppender::insertToStagingTable(const std::vector<TransformedLogRecor
             first = false;
 
             sql << "("
+                << "'" << escapeSqlString(record.kafka_topic) << "', "
+                << record.kafka_partition << ", "
+                << record.kafka_offset << ", "
                 << "'" << formatTimestamp(record.timestamp) << "', "
                 << "'" << escapeSqlString(record.severity) << "', "
                 << "'" << escapeSqlString(record.body) << "', "
@@ -298,6 +311,49 @@ bool IcebergAppender::flush() {
     } catch (const std::exception& e) {
         std::cerr << "Error during flush: " << e.what() << std::endl;
         return false;
+    }
+}
+
+std::map<int32_t, int64_t> IcebergAppender::getMaxCommittedOffsets(const std::string& topic) {
+    std::map<int32_t, int64_t> offsets;
+
+    try {
+        std::lock_guard<std::mutex> lock(db_mutex_);
+
+        // Query max offset per partition from Iceberg table for the given topic
+        std::ostringstream sql;
+        sql << "SELECT _kafka_partition, MAX(_kafka_offset) as max_offset "
+            << "FROM " << full_table_name_ << " "
+            << "WHERE _kafka_topic = '" << escapeSqlString(topic) << "' "
+            << "GROUP BY _kafka_partition";
+
+        auto result = conn_->Query(sql.str());
+        if (result->HasError()) {
+            std::cerr << "Error querying max offsets: " << result->GetError() << std::endl;
+            return offsets;
+        }
+
+        // Parse results into map
+        size_t row_count = result->RowCount();
+        for (size_t i = 0; i < row_count; ++i) {
+            int32_t partition = result->GetValue(0, i).GetValue<int32_t>();
+            int64_t max_offset = result->GetValue(1, i).GetValue<int64_t>();
+            offsets[partition] = max_offset;
+
+            std::cout << "Recovery: found max offset " << max_offset
+                      << " for partition " << partition
+                      << " in topic " << topic << std::endl;
+        }
+
+        if (offsets.empty()) {
+            std::cout << "Recovery: no existing data found for topic " << topic
+                      << ", will start from auto.offset.reset policy" << std::endl;
+        }
+
+        return offsets;
+    } catch (const std::exception& e) {
+        std::cerr << "Error querying max offsets: " << e.what() << std::endl;
+        return offsets;
     }
 }
 

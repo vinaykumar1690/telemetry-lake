@@ -7,30 +7,38 @@
 #include <algorithm>
 
 std::vector<TransformedLogRecord> LogTransformer::transform(
-    const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request) {
-    
+    const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request,
+    const std::string& kafka_topic,
+    int32_t kafka_partition,
+    int64_t kafka_offset) {
+
     std::vector<TransformedLogRecord> records;
-    
+
     // Iterate through all resource logs
     for (int i = 0; i < request.resource_logs_size(); ++i) {
         const auto& resource_logs = request.resource_logs(i);
         const auto& resource = resource_logs.resource();
-        
+
         // Extract well-known attributes from resource
         std::string service_name;
         std::string deployment_environment;
         std::string host_name;
         extractWellKnownAttributes(resource, service_name, deployment_environment, host_name);
-        
+
         // Iterate through all scope logs
         for (int j = 0; j < resource_logs.scope_logs_size(); ++j) {
             const auto& scope_logs = resource_logs.scope_logs(j);
-            
+
             // Iterate through all log records
             for (int k = 0; k < scope_logs.log_records_size(); ++k) {
                 const auto& log_record = scope_logs.log_records(k);
-                
+
                 TransformedLogRecord transformed;
+
+                // Set Kafka metadata for exactly-once semantics
+                transformed.kafka_topic = kafka_topic;
+                transformed.kafka_partition = kafka_partition;
+                transformed.kafka_offset = kafka_offset;
                 
                 // Extract timestamp
                 if (log_record.time_unix_nano() > 0) {

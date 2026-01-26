@@ -25,7 +25,7 @@ void signalHandler(int signal) {
     }
 }
 
-void runHealthServer(int port, IcebergAppender* appender, BufferManager* buffer_manager) {
+void runHealthServer(int port, IcebergAppender* appender, BufferManager* buffer_manager, QueueConsumer* consumer) {
     crow::SimpleApp app;
 
     // Health check endpoint
@@ -42,13 +42,17 @@ void runHealthServer(int port, IcebergAppender* appender, BufferManager* buffer_
 
     // Force flush endpoint
     CROW_ROUTE(app, "/flush").methods("POST"_method)
-    ([appender, buffer_manager]() {
+    ([appender, buffer_manager, consumer]() {
         std::cout << "Force flush requested via HTTP endpoint" << std::endl;
         if (appender->flush()) {
+            // Commit Kafka offsets after successful Iceberg flush
+            if (consumer->commitPendingOffsets()) {
+                consumer->clearPendingOffsets();
+            }
             buffer_manager->reset();
-            return crow::response(200, "Flush completed successfully");
+            return crow::response(200, "Flush completed successfully (offsets committed)");
         } else {
-            return crow::response(500, "Flush failed");
+            return crow::response(500, "Flush failed (offsets not committed)");
         }
     });
 
@@ -105,21 +109,37 @@ int main() {
             return 1;
         }
 
+        // Startup recovery: Query max committed offsets from Iceberg and seek consumer
+        std::cout << "Performing startup recovery..." << std::endl;
+        auto max_offsets = appender.getMaxCommittedOffsets(consumer.getTopic());
+        if (!max_offsets.empty()) {
+            if (!consumer.seekToOffsets(max_offsets)) {
+                std::cerr << "Warning: Failed to seek to recovered offsets" << std::endl;
+                // Continue anyway - worst case we re-process some data
+            }
+            std::cout << "Recovery complete: seeked to " << max_offsets.size()
+                      << " partition(s)" << std::endl;
+        } else {
+            std::cout << "Recovery complete: no previous offsets found, starting fresh" << std::endl;
+        }
+
         // Initialize dead letter queue (optional)
         const char* dlq_path = std::getenv("DLQ_PATH");
         DeadLetterQueue dlq(dlq_path ? dlq_path : "");
 
         // Start health server in a separate thread
-        std::thread health_thread(runHealthServer, health_port, &appender, &buffer_manager);
+        std::thread health_thread(runHealthServer, health_port, &appender, &buffer_manager, &consumer);
         health_thread.detach();
 
         std::cout << "OTel Log Appender started successfully" << std::endl;
         std::cout << "Buffer settings: " << config.buffer_size_mb << " MB or "
                   << config.buffer_time_seconds << " seconds" << std::endl;
+        std::cout << "Exactly-once semantics enabled: offsets committed after Iceberg flush" << std::endl;
         std::cout << "Send SIGUSR1 to force flush (kill -USR1 <pid>)" << std::endl;
 
-        // Start consuming messages
-        consumer.start([&](const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request) {
+        // Start consuming messages with exactly-once semantics
+        consumer.start([&](const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request,
+                          const KafkaMessageMeta& meta) {
             if (!g_running) {
                 return; // Stop processing if shutdown requested
             }
@@ -128,6 +148,10 @@ int main() {
             if (g_force_flush.exchange(false)) {
                 std::cout << "Processing force flush request..." << std::endl;
                 if (appender.flush()) {
+                    // Commit offsets to Kafka after successful Iceberg flush
+                    if (consumer.commitPendingOffsets()) {
+                        consumer.clearPendingOffsets();
+                    }
                     buffer_manager.reset();
                     std::cout << "Force flush completed" << std::endl;
                 } else {
@@ -136,17 +160,22 @@ int main() {
             }
 
             try {
-                // Transform log records
-                auto transformed = LogTransformer::transform(request);
+                // Transform log records with Kafka metadata for exactly-once semantics
+                auto transformed = LogTransformer::transform(
+                    request, meta.topic, meta.partition, meta.offset);
 
                 if (transformed.empty()) {
                     return; // No records to process
                 }
 
+                // Track offset for this partition (will be committed after Iceberg flush)
+                consumer.trackOffset(meta.partition, meta.offset);
+
                 // Estimate data size for buffer manager
                 size_t estimated_size = 0;
                 for (const auto& record : transformed) {
-                    estimated_size += record.body.size() + record.severity.size() +
+                    estimated_size += record.kafka_topic.size() + sizeof(record.kafka_partition) +
+                                    sizeof(record.kafka_offset) + record.body.size() + record.severity.size() +
                                     record.service_name.size() + record.deployment_environment.size() +
                                     record.host_name.size() + record.trace_id.size() + record.span_id.size();
                     for (const auto& attr : record.attributes) {
@@ -169,9 +198,17 @@ int main() {
                     std::cout << "Flush triggered: size=" << size_threshold_met
                               << ", time=" << time_threshold_met << std::endl;
                     if (appender.flush()) {
+                        // Exactly-once: Commit Kafka offsets ONLY after successful Iceberg flush
+                        if (consumer.commitPendingOffsets()) {
+                            consumer.clearPendingOffsets();
+                            std::cout << "Offsets committed after successful Iceberg flush" << std::endl;
+                        } else {
+                            std::cerr << "Warning: Iceberg flush succeeded but Kafka offset commit failed" << std::endl;
+                            // Data is safe in Iceberg; on restart, recovery query will skip duplicates
+                        }
                         buffer_manager.reset();
                     } else {
-                        std::cerr << "Flush failed, keeping data in buffer" << std::endl;
+                        std::cerr << "Flush failed, keeping data in buffer (offsets not committed)" << std::endl;
                     }
                 }
             } catch (const std::exception& e) {
@@ -182,7 +219,8 @@ int main() {
                     dlq.write(request, std::string("Processing error: ") + e.what());
                 }
 
-                // Continue processing - don't crash on individual message errors
+                // Note: Offset is NOT tracked for failed messages
+                // On restart, this message will be re-processed
             }
         });
 

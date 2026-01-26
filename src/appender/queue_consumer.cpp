@@ -76,13 +76,20 @@ void QueueConsumer::start(MessageCallback callback) {
                 try {
                     auto wrapper = deserializeWrapper(msg.get_payload());
                     auto request = parsePayload(wrapper);
-                    callback(request);
 
-                    // Commit offset after successful processing
-                    consumer_->commit(msg);
+                    // Create Kafka metadata for callback
+                    KafkaMessageMeta meta;
+                    meta.topic = msg.get_topic();
+                    meta.partition = msg.get_partition();
+                    meta.offset = msg.get_offset();
+
+                    callback(request, meta);
+
+                    // Note: Offset is NOT committed here anymore.
+                    // The caller must track offsets and commit after successful Iceberg flush.
                 } catch (const std::exception& e) {
                     std::cerr << "Error processing message: " << e.what() << std::endl;
-                    // Don't commit on error - will retry
+                    // Don't track offset on error - will retry on restart
                 }
             }
         }
@@ -141,5 +148,94 @@ opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest QueueConsume
     }
 
     return request;
+}
+
+void QueueConsumer::trackOffset(int32_t partition, int64_t offset) {
+    // Track the max offset seen for each partition
+    auto it = pending_offsets_.find(partition);
+    if (it == pending_offsets_.end() || offset > it->second) {
+        pending_offsets_[partition] = offset;
+    }
+}
+
+std::map<int32_t, int64_t> QueueConsumer::getPendingOffsets() const {
+    return pending_offsets_;
+}
+
+bool QueueConsumer::commitPendingOffsets() {
+    if (!consumer_ || pending_offsets_.empty()) {
+        return true; // Nothing to commit
+    }
+
+    try {
+        // Build list of topic-partition-offsets to commit
+        std::vector<cppkafka::TopicPartition> offsets_to_commit;
+        for (const auto& kv : pending_offsets_) {
+            // Commit offset + 1, as Kafka commits the NEXT offset to read
+            offsets_to_commit.emplace_back(config_.queue_topic, kv.first, kv.second + 1);
+        }
+
+        consumer_->commit(offsets_to_commit);
+        std::cout << "Committed offsets for " << offsets_to_commit.size() << " partitions" << std::endl;
+        return true;
+    } catch (const cppkafka::HandleException& e) {
+        std::cerr << "Error committing offsets: " << e.what() << std::endl;
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "Unexpected error committing offsets: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+void QueueConsumer::clearPendingOffsets() {
+    pending_offsets_.clear();
+}
+
+bool QueueConsumer::seekToOffsets(const std::map<int32_t, int64_t>& offsets) {
+    if (!consumer_ || offsets.empty()) {
+        return true; // Nothing to seek
+    }
+
+    try {
+        // Get current assignment to know which partitions we have
+        auto assignment = consumer_->get_assignment();
+
+        for (const auto& kv : offsets) {
+            int32_t partition = kv.first;
+            // Seek to offset + 1 (the next message after the one already written to Iceberg)
+            int64_t seek_offset = kv.second + 1;
+
+            // Create TopicPartition for seeking
+            cppkafka::TopicPartition tp(config_.queue_topic, partition, seek_offset);
+
+            // Check if we're assigned this partition
+            bool is_assigned = false;
+            for (const auto& assigned_tp : assignment) {
+                if (assigned_tp.get_partition() == partition) {
+                    is_assigned = true;
+                    break;
+                }
+            }
+
+            if (is_assigned) {
+                consumer_->assign({tp});
+                std::cout << "Sought partition " << partition << " to offset " << seek_offset
+                          << " (max committed: " << kv.second << ")" << std::endl;
+            } else {
+                std::cout << "Partition " << partition << " not assigned to this consumer, skipping seek" << std::endl;
+            }
+        }
+
+        // Re-assign all original partitions after seeking
+        consumer_->assign(assignment);
+
+        return true;
+    } catch (const cppkafka::HandleException& e) {
+        std::cerr << "Error seeking to offsets: " << e.what() << std::endl;
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "Unexpected error seeking to offsets: " << e.what() << std::endl;
+        return false;
+    }
 }
 

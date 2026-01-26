@@ -33,6 +33,10 @@ public:
     // Get number of records in buffer
     size_t getBufferRecordCount() const { return buffer_records_; }
 
+    // Query max committed offsets per partition from Iceberg (for recovery)
+    // Returns map of partition -> max_offset for the given topic
+    std::map<int32_t, int64_t> getMaxCommittedOffsets(const std::string& topic);
+
 private:
     AppenderConfig config_;
     std::unique_ptr<DuckDB> db_;
