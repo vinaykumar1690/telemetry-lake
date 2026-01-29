@@ -1,7 +1,4 @@
-#include "queue_consumer.hpp"
-#include "log_transformer.hpp"
-#include "iceberg_appender.hpp"
-#include "buffer_manager.hpp"
+#include "partition_coordinator.hpp"
 #include "dead_letter_queue.hpp"
 #include "../config.hpp"
 #include "crow.h"
@@ -14,6 +11,7 @@
 
 std::atomic<bool> g_running(true);
 std::atomic<bool> g_force_flush(false);
+PartitionCoordinator* g_coordinator = nullptr;
 
 void signalHandler(int signal) {
     if (signal == SIGUSR1) {
@@ -22,10 +20,13 @@ void signalHandler(int signal) {
     } else {
         std::cout << "\nReceived signal " << signal << ", shutting down gracefully..." << std::endl;
         g_running = false;
+        if (g_coordinator) {
+            g_coordinator->stop();
+        }
     }
 }
 
-void runHealthServer(int port, IcebergAppender* appender, BufferManager* buffer_manager, QueueConsumer* consumer) {
+void runHealthServer(int port, PartitionCoordinator* coordinator) {
     crow::SimpleApp app;
 
     // Health check endpoint
@@ -42,33 +43,28 @@ void runHealthServer(int port, IcebergAppender* appender, BufferManager* buffer_
 
     // Force flush endpoint
     CROW_ROUTE(app, "/flush").methods("POST"_method)
-    ([appender, buffer_manager, consumer]() {
+    ([coordinator]() {
         std::cout << "Force flush requested via HTTP endpoint" << std::endl;
-        if (appender->flush()) {
-            // Commit Kafka offsets after successful Iceberg flush
-            if (consumer->commitPendingOffsets()) {
-                consumer->clearPendingOffsets();
-            }
-            buffer_manager->reset();
+        if (coordinator->forceFlushAll()) {
             return crow::response(200, "Flush completed successfully (offsets committed)");
         } else {
-            return crow::response(500, "Flush failed (offsets not committed)");
+            return crow::response(500, "Flush failed (some partitions may not have flushed)");
         }
     });
 
     // Buffer stats endpoint
     CROW_ROUTE(app, "/stats")
-    ([appender, buffer_manager]() {
+    ([coordinator]() {
         crow::json::wvalue stats;
-        stats["buffer_size_bytes"] = appender->getBufferSize();
-        stats["buffer_records"] = appender->getBufferRecordCount();
-        stats["time_since_last_flush_seconds"] = buffer_manager->getTimeSinceReset().count();
+        stats["total_buffer_size_bytes"] = coordinator->getTotalBufferSize();
+        stats["total_buffer_records"] = coordinator->getTotalBufferRecordCount();
+        stats["is_running"] = coordinator->isRunning();
         return crow::response(200, stats);
     });
 
     std::cout << "Appender health server running on port " << port << std::endl;
-    std::cout << "  POST /flush - Force flush buffered data to Iceberg" << std::endl;
-    std::cout << "  GET /stats - Get buffer statistics" << std::endl;
+    std::cout << "  POST /flush - Force flush all partitions to Iceberg" << std::endl;
+    std::cout << "  GET /stats - Get aggregate buffer statistics" << std::endl;
     std::cout << "  GET /health - Health check" << std::endl;
 
     app.port(port).multithreaded().run();
@@ -91,36 +87,13 @@ int main() {
             health_port = std::atoi(health_port_str);
         }
 
-        // Create buffer manager
-        size_t buffer_size_bytes = config.buffer_size_mb * 1024 * 1024;
-        BufferManager buffer_manager(buffer_size_bytes, config.buffer_time_seconds);
+        // Initialize partition coordinator
+        PartitionCoordinator coordinator(config);
+        g_coordinator = &coordinator;
 
-        // Initialize queue consumer
-        QueueConsumer consumer(config);
-        if (!consumer.initialize()) {
-            std::cerr << "Failed to initialize queue consumer" << std::endl;
+        if (!coordinator.initialize()) {
+            std::cerr << "Failed to initialize partition coordinator" << std::endl;
             return 1;
-        }
-
-        // Initialize Iceberg appender
-        IcebergAppender appender(config);
-        if (!appender.initialize()) {
-            std::cerr << "Failed to initialize Iceberg appender" << std::endl;
-            return 1;
-        }
-
-        // Startup recovery: Query max committed offsets from Iceberg and seek consumer
-        std::cout << "Performing startup recovery..." << std::endl;
-        auto max_offsets = appender.getMaxCommittedOffsets(consumer.getTopic());
-        if (!max_offsets.empty()) {
-            if (!consumer.seekToOffsets(max_offsets)) {
-                std::cerr << "Warning: Failed to seek to recovered offsets" << std::endl;
-                // Continue anyway - worst case we re-process some data
-            }
-            std::cout << "Recovery complete: seeked to " << max_offsets.size()
-                      << " partition(s)" << std::endl;
-        } else {
-            std::cout << "Recovery complete: no previous offsets found, starting fresh" << std::endl;
         }
 
         // Initialize dead letter queue (optional)
@@ -128,103 +101,38 @@ int main() {
         DeadLetterQueue dlq(dlq_path ? dlq_path : "");
 
         // Start health server in a separate thread
-        std::thread health_thread(runHealthServer, health_port, &appender, &buffer_manager, &consumer);
+        std::thread health_thread(runHealthServer, health_port, &coordinator);
         health_thread.detach();
 
-        std::cout << "OTel Log Appender started successfully" << std::endl;
-        std::cout << "Buffer settings: " << config.buffer_size_mb << " MB or "
-                  << config.buffer_time_seconds << " seconds" << std::endl;
+        std::cout << "OTel Log Appender started successfully (multi-partition mode)" << std::endl;
+        std::cout << "Per-partition buffer settings: " << config.partition_buffer_size_mb << " MB or "
+                  << config.partition_buffer_time_seconds << " seconds" << std::endl;
         std::cout << "Exactly-once semantics enabled: offsets committed after Iceberg flush" << std::endl;
-        std::cout << "Send SIGUSR1 to force flush (kill -USR1 <pid>)" << std::endl;
+        std::cout << "Iceberg commit retries: " << config.iceberg_commit_retries
+                  << " (base delay: " << config.iceberg_retry_base_delay_ms << "ms)" << std::endl;
+        std::cout << "Send SIGUSR1 to force flush all partitions (kill -USR1 <pid>)" << std::endl;
 
-        // Start consuming messages with exactly-once semantics
-        consumer.start([&](const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request,
-                          const KafkaMessageMeta& meta) {
-            if (!g_running) {
-                return; // Stop processing if shutdown requested
-            }
-
-            // Check for force flush signal
-            if (g_force_flush.exchange(false)) {
-                std::cout << "Processing force flush request..." << std::endl;
-                if (appender.flush()) {
-                    // Commit offsets to Kafka after successful Iceberg flush
-                    if (consumer.commitPendingOffsets()) {
-                        consumer.clearPendingOffsets();
-                    }
-                    buffer_manager.reset();
-                    std::cout << "Force flush completed" << std::endl;
-                } else {
-                    std::cerr << "Force flush failed" << std::endl;
-                }
-            }
-
-            try {
-                // Transform log records with Kafka metadata for exactly-once semantics
-                auto transformed = LogTransformer::transform(
-                    request, meta.topic, meta.partition, meta.offset);
-
-                if (transformed.empty()) {
-                    return; // No records to process
-                }
-
-                // Track offset for this partition (will be committed after Iceberg flush)
-                consumer.trackOffset(meta.partition, meta.offset);
-
-                // Estimate data size for buffer manager
-                size_t estimated_size = 0;
-                for (const auto& record : transformed) {
-                    estimated_size += record.kafka_topic.size() + sizeof(record.kafka_partition) +
-                                    sizeof(record.kafka_offset) + record.body.size() + record.severity.size() +
-                                    record.service_name.size() + record.deployment_environment.size() +
-                                    record.host_name.size() + record.trace_id.size() + record.span_id.size();
-                    for (const auto& attr : record.attributes) {
-                        estimated_size += attr.first.size() + attr.second.size();
-                    }
-                    estimated_size += 100; // overhead
-                }
-
-                // Add to buffer manager and check if size threshold is met
-                bool size_threshold_met = buffer_manager.add(estimated_size);
-
-                // Append to Iceberg appender
-                bool flush_triggered = appender.append(transformed);
-
-                // Check time threshold
-                bool time_threshold_met = buffer_manager.shouldFlushByTime();
-
-                // Flush if either threshold is met
-                if (size_threshold_met || time_threshold_met || flush_triggered) {
-                    std::cout << "Flush triggered: size=" << size_threshold_met
-                              << ", time=" << time_threshold_met << std::endl;
-                    if (appender.flush()) {
-                        // Exactly-once: Commit Kafka offsets ONLY after successful Iceberg flush
-                        if (consumer.commitPendingOffsets()) {
-                            consumer.clearPendingOffsets();
-                            std::cout << "Offsets committed after successful Iceberg flush" << std::endl;
-                        } else {
-                            std::cerr << "Warning: Iceberg flush succeeded but Kafka offset commit failed" << std::endl;
-                            // Data is safe in Iceberg; on restart, recovery query will skip duplicates
-                        }
-                        buffer_manager.reset();
+        // Monitor for force flush signal in a separate check
+        std::thread flush_monitor([&coordinator]() {
+            while (g_running) {
+                if (g_force_flush.exchange(false)) {
+                    std::cout << "Processing force flush request..." << std::endl;
+                    if (coordinator.forceFlushAll()) {
+                        std::cout << "Force flush completed" << std::endl;
                     } else {
-                        std::cerr << "Flush failed, keeping data in buffer (offsets not committed)" << std::endl;
+                        std::cerr << "Force flush failed for some partitions" << std::endl;
                     }
                 }
-            } catch (const std::exception& e) {
-                std::cerr << "Error processing message: " << e.what() << std::endl;
-
-                // Write to dead letter queue if enabled
-                if (dlq.isEnabled()) {
-                    dlq.write(request, std::string("Processing error: ") + e.what());
-                }
-
-                // Note: Offset is NOT tracked for failed messages
-                // On restart, this message will be re-processed
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         });
+        flush_monitor.detach();
 
-        // If we get here, the consumer has stopped
+        // Start the coordinator (this blocks until stopped)
+        coordinator.start();
+
+        // If we get here, the coordinator has stopped
+        g_coordinator = nullptr;
         std::cout << "Appender stopped" << std::endl;
 
     } catch (const std::exception& e) {
@@ -239,8 +147,12 @@ int main() {
         std::cerr << "  S3_SECRET_KEY - S3 secret key" << std::endl;
         std::cerr << "  S3_BUCKET - S3 bucket name" << std::endl;
         std::cerr << "Optional:" << std::endl;
-        std::cerr << "  BUFFER_SIZE_MB - Buffer size threshold (default: 100)" << std::endl;
-        std::cerr << "  BUFFER_TIME_SECONDS - Buffer time threshold (default: 300)" << std::endl;
+        std::cerr << "  PARTITION_BUFFER_SIZE_MB - Per-partition buffer size threshold (default: 50)" << std::endl;
+        std::cerr << "  PARTITION_BUFFER_TIME_SECONDS - Per-partition buffer time threshold (default: 60)" << std::endl;
+        std::cerr << "  ICEBERG_COMMIT_RETRIES - Max Iceberg commit retries (default: 5)" << std::endl;
+        std::cerr << "  ICEBERG_RETRY_BASE_DELAY_MS - Base retry delay in ms (default: 100)" << std::endl;
+        std::cerr << "  ICEBERG_RETRY_MAX_DELAY_MS - Max retry delay in ms (default: 5000)" << std::endl;
+        std::cerr << "  REBALANCE_TIMEOUT_SECONDS - Worker shutdown timeout on rebalance (default: 30)" << std::endl;
         std::cerr << "  HEALTH_PORT - Health/flush endpoint port (default: 8080)" << std::endl;
         return 1;
     }

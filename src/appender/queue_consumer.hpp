@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <map>
+#include <vector>
 #include <cstdint>
 
 // Forward declarations
@@ -37,6 +38,10 @@ struct KafkaMessageMeta {
     int32_t partition;
     int64_t offset;
 };
+
+// Callback types for rebalance events
+using PartitionAssignmentCallback = std::function<void(const std::vector<int32_t>&)>;
+using PartitionRevocationCallback = std::function<void(const std::vector<int32_t>&)>;
 
 class QueueConsumer {
 public:
@@ -75,6 +80,18 @@ public:
     // Seek consumer to specific offsets per partition (for recovery)
     bool seekToOffsets(const std::map<int32_t, int64_t>& offsets);
 
+    // Seek a single partition to a specific offset
+    bool seekPartition(int32_t partition, int64_t offset);
+
+    // Commit offset for a specific partition
+    bool commitPartitionOffset(int32_t partition, int64_t offset);
+
+    // Set callback for partition assignment (rebalance)
+    void setAssignmentCallback(PartitionAssignmentCallback callback);
+
+    // Set callback for partition revocation (rebalance)
+    void setRevocationCallback(PartitionRevocationCallback callback);
+
     // Get the configured topic name
     const std::string& getTopic() const { return config_.queue_topic; }
 
@@ -87,6 +104,10 @@ private:
 
     // Pending offsets per partition (max offset seen for each partition)
     std::map<int32_t, int64_t> pending_offsets_;
+
+    // Rebalance callbacks
+    PartitionAssignmentCallback assignment_callback_;
+    PartitionRevocationCallback revocation_callback_;
 
     // Deserialize wrapper message from queue
     telemetry::v1::RawTelemetryMessage deserializeWrapper(const std::string& data);

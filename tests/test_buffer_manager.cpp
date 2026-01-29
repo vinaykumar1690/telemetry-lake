@@ -5,16 +5,16 @@
 
 TEST(BufferManagerTest, SizeThreshold) {
     BufferManager manager(1024, 60); // 1KB or 60 seconds
-    
-    // Add data up to threshold
+
+    // Add data up to threshold (need > 1024 bytes to trigger flush)
     bool should_flush = false;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 11; ++i) {
         should_flush = manager.add(100);
         if (should_flush) break;
     }
-    
+
     EXPECT_TRUE(should_flush);
-    EXPECT_GE(manager.getCurrentSize(), 1000u);
+    EXPECT_GE(manager.getCurrentSize(), 1024u);
 }
 
 TEST(BufferManagerTest, TimeThreshold) {

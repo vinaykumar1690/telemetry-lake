@@ -398,6 +398,9 @@ if(DUCKDB_FOUND)
     src/appender/queue_consumer.cpp
     src/appender/log_transformer.cpp
     src/appender/iceberg_appender.cpp
+    src/appender/iceberg_utils.cpp
+    src/appender/partition_worker.cpp
+    src/appender/partition_coordinator.cpp
     src/appender/buffer_manager.cpp
     src/appender/dead_letter_queue.cpp
     src/config.cpp
@@ -419,5 +422,44 @@ if(DUCKDB_FOUND)
     ${DUCKDB_INCLUDE_DIR}
     ${cppkafka_SOURCE_DIR}/include
   )
+
+  # Create iceberg utils test
+  add_executable(iceberg_utils_test
+    tests/test_iceberg_utils.cpp
+    src/appender/iceberg_utils.cpp
+  )
+  target_link_libraries(iceberg_utils_test PRIVATE
+    GTest::gtest
+    GTest::gtest_main
+    protobuf::libprotobuf
+    otel_proto
+    duckdb
+  )
+  target_include_directories(iceberg_utils_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${protobuf_SOURCE_DIR}/src
+    ${DUCKDB_INCLUDE_DIR}
+  )
+  add_test(NAME IcebergUtilsTest COMMAND iceberg_utils_test)
+
+  # Create partition worker test
+  add_executable(partition_worker_test
+    tests/test_partition_worker.cpp
+    src/appender/partition_worker.cpp
+    src/appender/iceberg_utils.cpp
+  )
+  target_link_libraries(partition_worker_test PRIVATE
+    GTest::gtest
+    GTest::gtest_main
+    protobuf::libprotobuf
+    otel_proto
+    duckdb
+  )
+  target_include_directories(partition_worker_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${protobuf_SOURCE_DIR}/src
+    ${DUCKDB_INCLUDE_DIR}
+  )
+  add_test(NAME PartitionWorkerTest COMMAND partition_worker_test)
 endif()
 

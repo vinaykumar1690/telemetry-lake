@@ -63,6 +63,14 @@ struct AppenderConfig {
     size_t buffer_size_mb = 100;
     int buffer_time_seconds = 300;  // 5 minutes
 
+    // Multi-partition threading configuration
+    size_t partition_buffer_size_mb = 50;      // Per-partition buffer threshold
+    int partition_buffer_time_seconds = 60;     // Per-partition time threshold
+    int iceberg_commit_retries = 5;             // Max retry attempts for Iceberg commits
+    int iceberg_retry_base_delay_ms = 100;      // Base backoff delay
+    int iceberg_retry_max_delay_ms = 5000;      // Max backoff cap
+    int rebalance_timeout_seconds = 30;         // Timeout for worker shutdown during rebalance
+
     static AppenderConfig fromEnv() {
         AppenderConfig config;
 
@@ -127,6 +135,37 @@ struct AppenderConfig {
         const char* buffer_time = std::getenv("BUFFER_TIME_SECONDS");
         if (buffer_time) {
             config.buffer_time_seconds = std::atoi(buffer_time);
+        }
+
+        // Multi-partition threading configuration
+        const char* partition_buffer_size = std::getenv("PARTITION_BUFFER_SIZE_MB");
+        if (partition_buffer_size) {
+            config.partition_buffer_size_mb = std::atoi(partition_buffer_size);
+        }
+
+        const char* partition_buffer_time = std::getenv("PARTITION_BUFFER_TIME_SECONDS");
+        if (partition_buffer_time) {
+            config.partition_buffer_time_seconds = std::atoi(partition_buffer_time);
+        }
+
+        const char* iceberg_retries = std::getenv("ICEBERG_COMMIT_RETRIES");
+        if (iceberg_retries) {
+            config.iceberg_commit_retries = std::atoi(iceberg_retries);
+        }
+
+        const char* retry_base_delay = std::getenv("ICEBERG_RETRY_BASE_DELAY_MS");
+        if (retry_base_delay) {
+            config.iceberg_retry_base_delay_ms = std::atoi(retry_base_delay);
+        }
+
+        const char* retry_max_delay = std::getenv("ICEBERG_RETRY_MAX_DELAY_MS");
+        if (retry_max_delay) {
+            config.iceberg_retry_max_delay_ms = std::atoi(retry_max_delay);
+        }
+
+        const char* rebalance_timeout = std::getenv("REBALANCE_TIMEOUT_SECONDS");
+        if (rebalance_timeout) {
+            config.rebalance_timeout_seconds = std::atoi(rebalance_timeout);
         }
 
         return config;

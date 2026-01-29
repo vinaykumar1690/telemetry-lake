@@ -29,11 +29,32 @@ bool QueueConsumer::initialize() {
         // Create consumer
         consumer_ = std::make_unique<cppkafka::Consumer>(*kafka_config_);
 
+        // Set rebalance callbacks on the consumer
+        consumer_->set_assignment_callback([this](cppkafka::TopicPartitionList& partitions) {
+            std::vector<int32_t> partition_ids;
+            for (const auto& tp : partitions) {
+                partition_ids.push_back(tp.get_partition());
+            }
+            if (assignment_callback_) {
+                assignment_callback_(partition_ids);
+            }
+        });
+
+        consumer_->set_revocation_callback([this](const cppkafka::TopicPartitionList& partitions) {
+            std::vector<int32_t> partition_ids;
+            for (const auto& tp : partitions) {
+                partition_ids.push_back(tp.get_partition());
+            }
+            if (revocation_callback_) {
+                revocation_callback_(partition_ids);
+            }
+        });
+
         // Subscribe to topic
         consumer_->subscribe({config_.queue_topic});
 
-        std::cout << "QueueConsumer initialized with brokers: " << config_.queue_brokers 
-                  << ", topic: " << config_.queue_topic 
+        std::cout << "QueueConsumer initialized with brokers: " << config_.queue_brokers
+                  << ", topic: " << config_.queue_topic
                   << ", group: " << config_.consumer_group << std::endl;
         return true;
     } catch (const std::exception& e) {
@@ -237,5 +258,66 @@ bool QueueConsumer::seekToOffsets(const std::map<int32_t, int64_t>& offsets) {
         std::cerr << "Unexpected error seeking to offsets: " << e.what() << std::endl;
         return false;
     }
+}
+
+bool QueueConsumer::seekPartition(int32_t partition, int64_t offset) {
+    if (!consumer_) {
+        return false;
+    }
+
+    try {
+        // Get current assignment
+        auto assignment = consumer_->get_assignment();
+
+        // Build new assignment list with updated offset for this partition
+        std::vector<cppkafka::TopicPartition> new_assignment;
+        for (const auto& tp : assignment) {
+            if (tp.get_partition() == partition) {
+                new_assignment.emplace_back(config_.queue_topic, partition, offset);
+            } else {
+                new_assignment.push_back(tp);
+            }
+        }
+
+        consumer_->assign(new_assignment);
+        std::cout << "Sought partition " << partition << " to offset " << offset << std::endl;
+        return true;
+    } catch (const cppkafka::HandleException& e) {
+        std::cerr << "Error seeking partition " << partition << ": " << e.what() << std::endl;
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "Unexpected error seeking partition " << partition << ": " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool QueueConsumer::commitPartitionOffset(int32_t partition, int64_t offset) {
+    if (!consumer_) {
+        return false;
+    }
+
+    try {
+        // Commit offset + 1, as Kafka commits the NEXT offset to read
+        std::vector<cppkafka::TopicPartition> offsets_to_commit;
+        offsets_to_commit.emplace_back(config_.queue_topic, partition, offset + 1);
+
+        consumer_->commit(offsets_to_commit);
+        std::cout << "Committed offset " << offset << " for partition " << partition << std::endl;
+        return true;
+    } catch (const cppkafka::HandleException& e) {
+        std::cerr << "Error committing offset for partition " << partition << ": " << e.what() << std::endl;
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "Unexpected error committing offset for partition " << partition << ": " << e.what() << std::endl;
+        return false;
+    }
+}
+
+void QueueConsumer::setAssignmentCallback(PartitionAssignmentCallback callback) {
+    assignment_callback_ = std::move(callback);
+}
+
+void QueueConsumer::setRevocationCallback(PartitionRevocationCallback callback) {
+    revocation_callback_ = std::move(callback);
 }
 
