@@ -2,6 +2,7 @@
 #include "ingester/http_server.hpp"
 #include "crow.h"
 #include <zlib.h>
+#include "google/rpc/status.pb.h"
 #include "telemetry_wrapper.pb.h"
 #include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
 
@@ -129,7 +130,7 @@ TEST_F(HttpServerTest, HandlesApplicationProtobufContentType) {
     app.handle_full(req, res);
 
     EXPECT_EQ(res.code, 200);
-    EXPECT_EQ(res.get_header_value("Content-Type"), "application/x-protobuf");
+    EXPECT_EQ(res.get_header_value("Content-Type"), "application/protobuf");
 }
 
 // Test JSON content type without gzip
@@ -167,11 +168,8 @@ TEST_F(HttpServerTest, HandlesJsonContentType) {
     app.handle_full(req, res);
 
     EXPECT_EQ(res.code, 200);
-    EXPECT_EQ(res.get_header_value("Content-Type"), "application/x-protobuf");
-    
-    // Verify response is valid protobuf
-    ExportLogsServiceResponse response;
-    EXPECT_TRUE(response.ParseFromString(res.body));
+    EXPECT_EQ(res.get_header_value("Content-Type"), "application/json");
+    EXPECT_EQ(res.body, "{}");
 }
 
 // Test JSON content type with gzip
@@ -213,11 +211,8 @@ TEST_F(HttpServerTest, HandlesJsonContentTypeWithGzip) {
     app.handle_full(req, res);
 
     EXPECT_EQ(res.code, 200);
-    EXPECT_EQ(res.get_header_value("Content-Type"), "application/x-protobuf");
-    
-    // Verify response is valid protobuf
-    ExportLogsServiceResponse response;
-    EXPECT_TRUE(response.ParseFromString(res.body));
+    EXPECT_EQ(res.get_header_value("Content-Type"), "application/json");
+    EXPECT_EQ(res.body, "{}");
 }
 
 // Test text/json content type (alternative)
@@ -245,7 +240,8 @@ TEST_F(HttpServerTest, HandlesTextJsonContentType) {
     app.handle_full(req, res);
 
     EXPECT_EQ(res.code, 200);
-    EXPECT_EQ(res.get_header_value("Content-Type"), "application/x-protobuf");
+    EXPECT_EQ(res.get_header_value("Content-Type"), "text/json");
+    EXPECT_EQ(res.body, "{}");
 }
 
 // Test Content-Type with charset parameter
@@ -333,7 +329,11 @@ TEST_F(HttpServerTest, RejectsInvalidGzipPayload) {
     app.handle_full(req, res);
 
     EXPECT_EQ(res.code, 400);
-    EXPECT_EQ(res.body, "Failed to decompress gzip payload");
+    EXPECT_EQ(res.get_header_value("Content-Type"), "application/x-protobuf");
+    google::rpc::Status status;
+    ASSERT_TRUE(status.ParseFromString(res.body));
+    EXPECT_EQ(status.code(), 3);  // INVALID_ARGUMENT
+    EXPECT_EQ(status.message(), "Failed to decompress gzip payload");
 }
 
 // Test empty gzip payload
@@ -400,4 +400,5 @@ TEST_F(HttpServerTest, HandlesCaseInsensitiveContentType) {
 
     EXPECT_EQ(res.code, 200);
 }
+
 

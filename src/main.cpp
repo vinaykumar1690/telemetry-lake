@@ -18,7 +18,7 @@ int main() {
         
         // Create HTTP server with queue producer
         HttpServer server(queue_producer);
-        server.start("0.0.0.0", 4318);
+        server.start();
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
         std::cerr << "Please set required environment variables:" << std::endl;

@@ -1,62 +1,204 @@
 #include "http_server.hpp"
 #include "queue_producer.hpp"
 #include "crow.h"
-#include <iostream>
 #include <algorithm>
-#include <cctype>
+#include <array>
+#include <expected>
+#include <format>
+#include <iostream>
+#include <limits>
+#include <span>
+#include <string_view>
+#include <utility>
 #include <zlib.h>
+#include <google/protobuf/util/json_util.h>
+#include "google/rpc/status.pb.h"
 #include "telemetry_wrapper.pb.h"
-#include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
 
-using opentelemetry::proto::collector::logs::v1::ExportLogsServiceResponse;
+namespace {
 
-static bool decompressGzip(const std::string &in, std::string &out) {
-    if (in.empty()) { out.clear(); return true; }
+// Wire format of the request; OTLP/HTTP requires the response to use the same one
+enum class Wire { Protobuf, Json };
+
+struct MediaType {
+    std::string_view name;  // canonical lowercase form, echoed in the response
+    Wire wire;
+};
+
+constexpr std::array kSupportedMediaTypes{
+    MediaType{"application/x-protobuf", Wire::Protobuf},
+    MediaType{"application/protobuf", Wire::Protobuf},
+    MediaType{"application/json", Wire::Json},
+    MediaType{"text/json", Wire::Json},
+};
+
+// Used for errors raised before the request's media type is known
+constexpr MediaType kDefaultMediaType = kSupportedMediaTypes[0];
+
+constexpr std::array<std::string_view, 2> kIdentityEncodings{"", "identity"};
+constexpr std::array<std::string_view, 2> kGzipEncodings{"gzip", "x-gzip"};
+
+// google.rpc.Code values used in error bodies
+constexpr int kGrpcInvalidArgument = 3;
+constexpr int kGrpcInternal = 13;
+constexpr int kGrpcUnavailable = 14;
+
+// Seconds a client should wait before retrying a 503
+constexpr std::string_view kRetryAfterSeconds = "1";
+
+constexpr bool isOws(char c) { return c == ' ' || c == '\t'; }
+
+constexpr char asciiLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+// Trim HTTP optional whitespace (SP / HTAB)
+constexpr std::string_view trimOws(std::string_view s) {
+    while (!s.empty() && isOws(s.front())) s.remove_prefix(1);
+    while (!s.empty() && isOws(s.back())) s.remove_suffix(1);
+    return s;
+}
+
+constexpr bool iequals(std::string_view a, std::string_view b) {
+    return std::ranges::equal(a, b, {}, asciiLower, asciiLower);
+}
+
+// Media type of a Content-Type header value, without parameters such as charset
+const MediaType* findMediaType(std::string_view content_type) {
+    const std::string_view media = trimOws(content_type.substr(0, content_type.find(';')));
+    auto it = std::ranges::find_if(kSupportedMediaTypes,
+                                   [&](const MediaType& m) { return iequals(m.name, media); });
+    return it == kSupportedMediaTypes.end() ? nullptr : &*it;
+}
+
+bool isOneOf(std::string_view value, std::span<const std::string_view> candidates) {
+    return std::ranges::contains(candidates, true,
+                                 [&](std::string_view c) { return iequals(c, value); });
+}
+
+enum class DecodeError { Corrupt, TooLarge };
+
+// Inflate a gzip body (including concatenated members, RFC 1952 §2.2), refusing
+// to produce more than max_out bytes.
+std::expected<std::string, DecodeError> decompressGzip(std::string_view in, std::size_t max_out) {
+    std::string out;
+    if (in.empty()) return out;
+    if (in.size() > std::numeric_limits<uInt>::max()) {
+        return std::unexpected(DecodeError::TooLarge);
+    }
+
     z_stream strm{};
+    // 16 + MAX_WBITS: expect a gzip header and trailer
+    if (inflateInit2(&strm, 16 + MAX_WBITS) != Z_OK) {
+        return std::unexpected(DecodeError::Corrupt);
+    }
+    struct InflateGuard {
+        z_stream* s;
+        ~InflateGuard() { inflateEnd(s); }
+    } guard{&strm};
+
     strm.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(in.data()));
     strm.avail_in = static_cast<uInt>(in.size());
 
-    // 16 + MAX_WBITS to enable gzip decoding with automatic header detection
-    if (inflateInit2(&strm, 16 + MAX_WBITS) != Z_OK) {
-        return false;
+    // Size hint: ISIZE trailer (uncompressed size mod 2^32 of the last member)
+    std::size_t hint = in.size() * 4;
+    if (in.size() >= 18) {
+        const auto* t = reinterpret_cast<const unsigned char*>(in.data() + in.size() - 4);
+        hint = std::max<std::size_t>(hint, t[0] | (t[1] << 8) | (t[2] << 16) |
+                                               (static_cast<std::size_t>(t[3]) << 24));
     }
 
-    char buf[4096];
-    int ret;
-    do {
-        strm.next_out = reinterpret_cast<Bytef*>(buf);
-        strm.avail_out = sizeof(buf);
-        ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret != Z_OK && ret != Z_STREAM_END) {
-            inflateEnd(&strm);
-            return false;
-        }
-        size_t have = sizeof(buf) - strm.avail_out;
-        out.append(buf, have);
-    } while (ret != Z_STREAM_END);
+    // Allow one byte past the limit so "exactly max_out" is distinguishable from "more"
+    const std::size_t hard_cap = max_out + 1;
+    std::size_t target = std::min(hard_cap, std::max<std::size_t>(hint, 4096));
+    bool done = false;
+    bool corrupt = false;
 
-    inflateEnd(&strm);
-    return true;
+    while (!done) {
+        const std::size_t old_size = out.size();
+        const std::size_t new_size = std::min({hard_cap,
+                                               std::max(target, old_size * 2),
+                                               old_size + std::numeric_limits<uInt>::max()});
+        out.resize_and_overwrite(new_size, [&](char* buf, std::size_t n) {
+            strm.next_out = reinterpret_cast<Bytef*>(buf + old_size);
+            strm.avail_out = static_cast<uInt>(n - old_size);
+            while (strm.avail_out > 0) {
+                const int ret = inflate(&strm, Z_NO_FLUSH);
+                if (ret == Z_STREAM_END) {
+                    if (strm.avail_in == 0) {
+                        done = true;
+                        break;
+                    }
+                    // Another gzip member follows
+                    if (inflateReset(&strm) != Z_OK) {
+                        corrupt = true;
+                        break;
+                    }
+                    continue;
+                }
+                // Z_BUF_ERROR with output space left means the input ended mid-stream
+                if (ret != Z_OK) {
+                    corrupt = true;
+                    break;
+                }
+            }
+            return n - strm.avail_out;
+        });
+
+        if (corrupt) return std::unexpected(DecodeError::Corrupt);
+        if (out.size() > max_out) return std::unexpected(DecodeError::TooLarge);
+    }
+    return out;
 }
 
-HttpServer::HttpServer() : queue_producer_(nullptr) {}
-
-HttpServer::HttpServer(std::shared_ptr<QueueProducer> queue_producer)
-    : queue_producer_(queue_producer) {}
-
-static inline std::string to_lower_trimmed(const std::string &s) {
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    // trim spaces
-    size_t start = out.find_first_not_of(' ');
-    size_t end = out.find_last_not_of(' ');
-    if (start == std::string::npos) return std::string();
-    return out.substr(start, end - start + 1);
+crow::response makeResponse(int code, std::string_view content_type, std::string body) {
+    crow::response res(code, std::move(body));
+    res.set_header("Content-Type", std::string(content_type));
+    return res;
 }
+
+// Successful export: an empty ExportLogsServiceResponse, which serializes to ""
+// in protobuf and "{}" in JSON
+crow::response okResponse(const MediaType& media) {
+    return makeResponse(200, media.name, media.wire == Wire::Json ? "{}" : "");
+}
+
+// OTLP/HTTP error: google.rpc.Status encoded like the request
+crow::response errorResponse(const MediaType& media, int http_code, int grpc_code,
+                             std::string_view message) {
+    google::rpc::Status status;
+    status.set_code(grpc_code);
+    status.set_message(std::string(message));
+
+    std::string body;
+    if (media.wire == Wire::Json) {
+        if (!google::protobuf::util::MessageToJsonString(status, &body).ok()) body = "{}";
+    } else {
+        status.SerializeToString(&body);
+    }
+
+    crow::response res = makeResponse(http_code, media.name, std::move(body));
+    if (http_code == 503) {
+        res.set_header("Retry-After", std::string(kRetryAfterSeconds));
+    }
+    return res;
+}
+
+crow::response unavailableResponse(const MediaType& media) {
+    return errorResponse(media, 503, kGrpcUnavailable,
+                         "Service Unavailable: queue is at capacity, retry later");
+}
+
+}  // namespace
+
+HttpServer::HttpServer() = default;
+
+HttpServer::HttpServer(std::shared_ptr<QueueProducer> queue_producer, HttpServerOptions options)
+    : queue_producer_(std::move(queue_producer)), options_(std::move(options)) {}
 
 void HttpServer::setupRoutes(crow::SimpleApp& app) {
     auto queue_producer = queue_producer_;  // Capture for lambda
+    const auto options = options_;
 
     // Health check endpoint for Kubernetes liveness probe
     CROW_ROUTE(app, "/health")
@@ -76,76 +218,92 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
 
     CROW_ROUTE(app, "/v1/logs")
         .methods("POST"_method)
-        ([queue_producer](const crow::request& req){
-            std::string content_type = req.get_header_value("Content-Type");
-            // strip parameters like charset
-            auto semipos = content_type.find(';');
-            if (semipos != std::string::npos) content_type = content_type.substr(0, semipos);
-            content_type = to_lower_trimmed(content_type);
-
-            // Validate content type (but don't parse - defer to consumer)
-            if (content_type != "application/x-protobuf" &&
-                content_type != "application/protobuf" &&
-                content_type != "application/json" &&
-                content_type != "text/json") {
-                return crow::response(415, "Unsupported Media Type");
+        ([queue_producer, options](const crow::request& req){
+            if (req.body.size() > options.max_body_bytes) {
+                return errorResponse(kDefaultMediaType, 413, kGrpcInvalidArgument,
+                                     "Payload Too Large");
             }
 
-            // Decompress gzip if needed
-            std::string body = req.body;
-            std::string content_encoding = to_lower_trimmed(req.get_header_value("Content-Encoding"));
-            if (content_encoding == "gzip") {
-                std::string decompressed;
-                if (!decompressGzip(req.body, decompressed)) {
-                    return crow::response(400, "Failed to decompress gzip payload");
-                }
-                body.swap(decompressed);
+            // Validate content type (but don't parse - defer to consumer)
+            const MediaType* media = findMediaType(req.get_header_value("Content-Type"));
+            if (!media) {
+                return errorResponse(kDefaultMediaType, 415, kGrpcInvalidArgument,
+                                     "Unsupported Media Type");
+            }
+
+            const std::string_view encoding = trimOws(req.get_header_value("Content-Encoding"));
+            const bool gzip = isOneOf(encoding, kGzipEncodings);
+            if (!gzip && !isOneOf(encoding, kIdentityEncodings)) {
+                return errorResponse(*media, 415, kGrpcInvalidArgument,
+                                     "Unsupported Content-Encoding");
+            }
+
+            // Shed load before spending CPU on decompression
+            if (queue_producer && queue_producer->isAtCapacity()) {
+                return unavailableResponse(*media);
             }
 
             // Create wrapper message with raw (decompressed) payload
             telemetry::v1::RawTelemetryMessage wrapper;
-            wrapper.set_content_type(content_type);
+            wrapper.set_content_type(std::string(media->name));
             wrapper.set_telemetry_type(telemetry::v1::OTEL_LOGS);
-            wrapper.set_payload(body);
-
-            // Produce to queue if available
-            if (queue_producer) {
-                // Check backpressure before attempting to produce
-                if (queue_producer->isAtCapacity()) {
-                    return crow::response(429, "Too Many Requests: Queue is at capacity");
+            if (gzip) {
+                auto decompressed = decompressGzip(req.body, options.max_decompressed_bytes);
+                if (!decompressed) {
+                    switch (decompressed.error()) {
+                        case DecodeError::TooLarge:
+                            return errorResponse(*media, 413, kGrpcInvalidArgument,
+                                                 "Payload Too Large after decompression");
+                        case DecodeError::Corrupt:
+                            return errorResponse(*media, 400, kGrpcInvalidArgument,
+                                                 "Failed to decompress gzip payload");
+                    }
+                    std::unreachable();
                 }
-
-                ProduceResult result = queue_producer->produce(wrapper);
-
-                if (result == ProduceResult::QUEUE_FULL) {
-                    return crow::response(503, "Service Unavailable: Queue is full");
-                } else if (result == ProduceResult::PERSISTENT_ERROR) {
-                    return crow::response(500, "Internal Server Error: Failed to queue message");
-                } else if (result != ProduceResult::SUCCESS) {
-                    return crow::response(503, "Service Unavailable: Queue error");
-                }
+                wrapper.set_payload(std::move(*decompressed));
             } else {
-                // Fallback: just log (for testing without queue)
-                std::cout << "Received RawTelemetryMessage with content_type="
-                          << content_type << ", payload_size=" << body.size() << std::endl;
+                wrapper.set_payload(req.body);
             }
 
-            ExportLogsServiceResponse resp_msg;
-            std::string resp_body;
-            if (!resp_msg.SerializeToString(&resp_body)) {
-                return crow::response(500, "Failed to serialize response");
+            // Without a producer (tests), accept and discard
+            if (!queue_producer) {
+                return okResponse(*media);
             }
-            crow::response res(200, resp_body);
-            res.add_header("Content-Type", "application/x-protobuf");
-            return res;
+
+            switch (queue_producer->produce(wrapper)) {
+                case ProduceResult::SUCCESS:
+                    return okResponse(*media);
+                case ProduceResult::QUEUE_FULL:
+                    return unavailableResponse(*media);
+                case ProduceResult::RETRYABLE_ERROR:
+                    return errorResponse(*media, 503, kGrpcUnavailable,
+                                         "Service Unavailable: queue error, retry later");
+                case ProduceResult::PAYLOAD_TOO_LARGE:
+                    return errorResponse(*media, 413, kGrpcInvalidArgument,
+                                         "Payload Too Large for queue");
+                case ProduceResult::PERSISTENT_ERROR:
+                    return errorResponse(*media, 500, kGrpcInternal,
+                                         "Internal Server Error: failed to queue message");
+            }
+            std::unreachable();
         });
 }
 
-void HttpServer::start(const std::string& host, int port) {
+void HttpServer::start() {
     crow::SimpleApp app;
+    app.loglevel(options_.log_level);
     setupRoutes(app);
 
-    std::cout << "OTel Log Receiver is running at http://" << host << ":" << port << std::endl;
-    app.bindaddr(host).port(port).multithreaded().run();
-}
+    app.bindaddr(options_.host)
+        .port(options_.port)
+        .server_name(options_.server_name);
+    if (options_.threads > 0) {
+        app.concurrency(options_.threads);
+    } else {
+        app.multithreaded();
+    }
 
+    std::cout << std::format("OTel Log Receiver is running at http://{}:{}\n",
+                             options_.host, options_.port);
+    app.run();
+}
