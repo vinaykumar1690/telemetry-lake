@@ -158,9 +158,9 @@ sequenceDiagram
     S->>P: tryRoute(Work{p, o, payload view})
     P->>P: decodeKafkaPayload -> transformLogs
     P->>G: PartitionStaging::append(rows, o)
-    Note over G: rows in stg_p{p}_g{n}; offset(p) = o
+    Note over G: rows in stg_p{p}_g{n}, offset(p) = o
     M->>G: sealAll (switch p to generation n+1)
-    M->>L: BEGIN; INSERT logs ...; INSERT _appender_offsets (p, o); COMMIT
+    M->>L: BEGIN, INSERT logs, INSERT _appender_offsets (p, o), COMMIT
     L-->>M: committed (single transactions/commit)
     M->>G: DROP stg_p{p}_g{n}
     M->>S: onCommitted {p: o}
@@ -189,12 +189,29 @@ Step by step, with code:
    - A batch is all-or-nothing ([:169](../src/appender/staging_store.cpp#L169)).
 
    The partition's staged offset moves to the message offset, even for a request with zero records.
-5. **Seal and commit** ([`IcebergCommitter::cycle`](../src/appender/iceberg_committer.cpp#L178)). A cycle starts when:
-   - total staged bytes reach `BUFFER_SIZE_MB`, or
+5. **Seal and commit** ([`IcebergCommitter::cycle`](../src/appender/iceberg_committer.cpp#L178)). The committer thread checks its triggers every 200 ms ([`dueLocked`](../src/appender/iceberg_committer.cpp#L90)) and starts a cycle when:
+   - unsealed staged bytes across all partitions reach `BUFFER_SIZE_MB` (sealed buffers still waiting to commit don't count), or
    - the oldest staged row is `BUFFER_TIME_SECONDS` old, or
-   - a flush is requested (`POST /flush`, SIGUSR1, shutdown).
+   - a flush is requested (`POST /flush`, SIGUSR1, shutdown), or
+   - buffers from a failed cycle are pending and their retry backoff has expired, so a failed commit is retried without waiting for new data.
 
-   [`sealAll`](../src/appender/staging_store.cpp) switches every non-fenced partition to a fresh generation (appends never wait for Iceberg). The sealed tables, plus any left over from failed cycles, are committed by [`DuckdbIcebergSink::commit`](../src/appender/duckdb_iceberg.cpp#L57) in **one** transaction:
+   **Sealing.** Each partition stages into its own DuckDB table, called a *generation* (`stg_p{partition}_g{n}`). Under one lock, [`sealAll`](../src/appender/staging_store.cpp) freezes the current generation of every non-fenced partition and gives it a fresh, empty one. For example, `stg_p0_g7` becomes a sealed buffer with its max offset, and appends continue into `stg_p0_g8`. Pipeline threads therefore never wait for Iceberg; they only wait for that brief `CREATE TABLE`. Fenced partitions (being revoked) are never sealed, so their data cannot be committed after the partition has a new owner.
+
+   **Failed cycles.** If a commit fails, its sealed buffers stay in the committer's pending list and are not dropped. The next cycle commits them **together with** the newly sealed buffers, in one transaction. A partition's offsets therefore never get ahead of the rows actually in the table.
+
+   ```
+   t=0s    p0 appends rows into g7
+   t=60s   oldest row is 60 s old → cycle starts
+           seal: g7 frozen, g8 created        (p0 keeps appending into g8)
+           commit {g7} → catalog error
+   t=61s   retry backoff expires → cycle starts
+           seal: g8 frozen, g9 created
+           commit {g7, g8} → success → drop g7, g8; _appender_offsets now says p0 = g8's max offset
+   ```
+
+   If the outcome of a commit is unknown (a timeout during `COMMIT`), the next attempt first reads `_appender_offsets`. Buffers whose offsets are already durable are dropped instead of being written twice ([`dropLanded`](../src/appender/iceberg_committer.cpp#L138); see [6.3](#63-kafka--iceberg-appender-exactly-once)).
+
+   All sealed buffers of a cycle are committed by [`DuckdbIcebergSink::commit`](../src/appender/duckdb_iceberg.cpp#L57) in **one** transaction:
 
    ```sql
    BEGIN TRANSACTION;
