@@ -141,10 +141,12 @@ appender:
     brokers: ""  # Defaults to kafka.<namespace>.svc.cluster.local:9092
     topic: "telemetry-logs"
     consumerGroup: "otel-appender"
+    dlqTopic: ""  # Defaults to <topic>-dlq (auto-created when autoCreateTopics is on)
   # Iceberg catalog settings
   iceberg:
-    # Catalog URI - uses Nessie service from this chart
-    catalogUri: ""  # Defaults to http://nessie.<namespace>.svc.cluster.local:19120/api/v1
+    # Catalog URI - uses Nessie's Iceberg REST endpoint from this chart
+    catalogUri: ""  # Defaults to http://nessie:19120/iceberg/
+    warehouse: ""   # Defaults to nessie.warehouse
     tableName: "logs"
   # S3/MinIO storage settings
   s3:
@@ -158,12 +160,17 @@ appender:
     secretKeySecret:
       name: ""  # If empty, uses minio.secretKey from values
       key: "secret-key"
-  # Buffer settings for batching writes
+  # Commit triggers (whichever comes first) and the staging cap
   buffer:
     sizeMB: 100
-    timeSeconds: 300
-  # Dead letter queue path (optional, empty to disable)
-  dlqPath: ""
+    timeSeconds: 60
+    maxStagedMB: 256   # must be >= sizeMB; keep well under the memory limit
+  pipeline:
+    threads: 2
+    queueMB: 32        # per thread
+  revokeTimeoutSeconds: 60
+  terminationGracePeriodSeconds: 120
+  healthPort: 8080
   resources:
     requests:
       memory: "256Mi"

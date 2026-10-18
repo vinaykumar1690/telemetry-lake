@@ -18,6 +18,9 @@ spec:
         app: appender
         {{- include "telemetry-lake.labels" . | nindent 8 }}
     spec:
+      # SIGTERM triggers a drain and a final Iceberg commit (with retries);
+      # give it time before the kubelet sends SIGKILL
+      terminationGracePeriodSeconds: {{ .Values.appender.terminationGracePeriodSeconds }}
       containers:
         - name: appender
           image: "{{ .Values.appender.image.repository }}:{{ .Values.appender.image.tag }}"
@@ -64,16 +67,47 @@ spec:
                   name: s3-credentials
                   key: secret-key
               {{- end }}
-            # Buffer configuration
+            # Iceberg warehouse registered in Nessie
+            - name: ICEBERG_WAREHOUSE
+              value: {{ .Values.appender.iceberg.warehouse | default .Values.nessie.warehouse | quote }}
+            # Commit triggers: total staged bytes across partitions, or age of the oldest staged row
             - name: BUFFER_SIZE_MB
               value: {{ .Values.appender.buffer.sizeMB | quote }}
             - name: BUFFER_TIME_SECONDS
               value: {{ .Values.appender.buffer.timeSeconds | quote }}
-            # Dead letter queue (optional)
-            {{- if .Values.appender.dlqPath }}
-            - name: DLQ_PATH
-              value: {{ .Values.appender.dlqPath | quote }}
-            {{- end }}
+            # Staged bytes at which consumption is throttled (backpressure)
+            - name: MAX_STAGED_MB
+              value: {{ .Values.appender.buffer.maxStagedMB | quote }}
+            - name: PIPELINE_THREADS
+              value: {{ .Values.appender.pipeline.threads | quote }}
+            - name: PIPELINE_QUEUE_MB
+              value: {{ .Values.appender.pipeline.queueMB | quote }}
+            # Poison messages are produced here with their original bytes
+            - name: KAFKA_DLQ_TOPIC
+              value: {{ .Values.appender.kafka.dlqTopic | default (printf "%s-dlq" .Values.appender.kafka.topic) | quote }}
+            - name: REVOKE_TIMEOUT_SECONDS
+              value: {{ .Values.appender.revokeTimeoutSeconds | quote }}
+            - name: HEALTH_PORT
+              value: {{ .Values.appender.healthPort | quote }}
+            - name: APPENDER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: health
+              containerPort: {{ .Values.appender.healthPort }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
           resources:
             {{- toYaml .Values.appender.resources | nindent 12 }}
 {{- end }}

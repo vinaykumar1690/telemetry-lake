@@ -89,6 +89,11 @@ RUN useradd -r -s /bin/false -m -d /home/appender appender && \
 
 USER appender
 ENV HOME=/home/appender
+# DuckDB installs the httpfs/iceberg extensions under this directory
+ENV DUCKDB_HOME_DIRECTORY=/home/appender
+
+# /health, /ready, /flush, /metrics
+EXPOSE 8080
 
 # Default command
 ENTRYPOINT ["/usr/local/bin/otel_appender"]

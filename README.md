@@ -153,15 +153,34 @@ Also cap the request body at your ingress (for example nginx `client_max_body_si
 | `KAFKA_BROKERS` | (required) | Kafka broker addresses (e.g., `kafka:9092`) |
 | `KAFKA_TOPIC` | `otel-logs` | Topic to consume from |
 | `KAFKA_CONSUMER_GROUP` | `otel-appender` | Kafka consumer group ID |
-| `ICEBERG_CATALOG_URI` | (required) | Nessie/Iceberg REST catalog URL |
-| `S3_ENDPOINT` | (required) | S3/MinIO endpoint URL |
-| `S3_ACCESS_KEY` | (required) | S3 access key |
-| `S3_SECRET_KEY` | (required) | S3 secret key |
-| `S3_BUCKET` | (required) | S3 bucket for Iceberg data |
-| `ICEBERG_TABLE_NAME` | `logs` | Iceberg table name |
-| `BUFFER_SIZE_MB` | `100` | Buffer size before flush (MB) |
-| `BUFFER_TIME_SECONDS` | `300` | Max time before flush (seconds) |
-| `DLQ_PATH` | (optional) | Dead letter queue file path |
+| `KAFKA_DLQ_TOPIC` | `<topic>-dlq` | Topic that receives undecodable messages (original bytes + error headers) |
+| `ICEBERG_CATALOG_URI` | (required) | Iceberg REST catalog URL (Nessie: `http://nessie:19120/iceberg/`) |
+| `ICEBERG_WAREHOUSE` | `S3_BUCKET` | Warehouse name passed to `ATTACH` |
+| `ICEBERG_NAMESPACE` | `default` | Namespace of both tables |
+| `ICEBERG_TABLE_NAME` | `logs` | Logs table |
+| `ICEBERG_OFFSETS_TABLE` | `_appender_offsets` | Offsets table (source of truth for recovery) |
+| `ICEBERG_PARTITION_SPEC` | `day` | `day`, `hour` or `none` partitioning of the logs table on `timestamp` |
+| `S3_ENDPOINT` | (required) | S3/MinIO endpoint; an `https://` prefix enables TLS |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | (required) | S3 credentials |
+| `S3_BUCKET` | (optional) | Default warehouse name |
+| `S3_REGION` / `S3_URL_STYLE` | `us-east-1` / `path` | S3 addressing |
+| `BUFFER_SIZE_MB` | `100` | Commit when this much data is staged across all partitions |
+| `BUFFER_TIME_SECONDS` | `60` | ... or when the oldest staged row is this old |
+| `MAX_STAGED_MB` | `512` | Staged bytes at which consumption is throttled |
+| `PIPELINE_THREADS` | hardware threads (max 16) | Decode/transform/stage threads |
+| `PIPELINE_QUEUE_MB` | `64` | Queue size per pipeline thread |
+| `ICEBERG_COMMIT_RETRIES` | `5` | Attempts per commit cycle |
+| `ICEBERG_RETRY_BASE_DELAY_MS` / `ICEBERG_RETRY_MAX_DELAY_MS` | `200` / `10000` | Retry backoff |
+| `REVOKE_TIMEOUT_SECONDS` | `60` | Max wait for an in-flight commit when partitions are revoked (must be below `MAX_POLL_INTERVAL_MS`) |
+| `MAX_POLL_INTERVAL_MS` | `300000` | Kafka `max.poll.interval.ms` |
+| `OFFSETS_MAINTENANCE_INTERVAL_SECONDS` | `3600` | Offsets table pruning (only where DuckDB can compact; 0 disables) |
+| `HEALTH_PORT` | `8080` | `/health`, `/ready`, `POST /flush`, `/metrics` |
+| `APPENDER_ID` | hostname | Recorded with each offsets row |
+| `DUCKDB_HOME_DIRECTORY` | `/tmp` | Where DuckDB installs its extensions (must be writable) |
+
+The appender needs DuckDB 1.5.4 or newer. Delivery into Iceberg is exactly-once: each commit writes the log rows and their Kafka offsets to the offsets table in one atomic Iceberg transaction, and recovery resumes from that table. See [docs/design.md](docs/design.md).
+
+Signals: `SIGINT`/`SIGTERM` drain, commit and exit; `SIGUSR1` forces a commit. Exit codes: 0 clean, 1 configuration/startup error, 2 fatal runtime error.
 
 ## How to Run
 
@@ -184,16 +203,19 @@ OTel Log Receiver is running at http://0.0.0.0:4318
 ### Start the Appender
 
 ```bash
-# Configure and run
 export KAFKA_BROKERS=localhost:9092
 export KAFKA_TOPIC=otel-logs
-export ICEBERG_CATALOG_URI=http://localhost:8181
+export ICEBERG_CATALOG_URI=http://localhost:19120/iceberg/
+export ICEBERG_WAREHOUSE=telemetrylake
 export S3_ENDPOINT=http://localhost:9000
 export S3_ACCESS_KEY=minioadmin
 export S3_SECRET_KEY=minioadmin
-export S3_BUCKET=iceberg
 
 ./otel_appender
+
+curl localhost:8080/ready            # 200 once polling and committing
+curl -X POST localhost:8080/flush    # commit everything staged now
+curl localhost:8080/metrics          # Prometheus metrics
 ```
 
 ## How to Send Logs
@@ -247,30 +269,29 @@ echo '{"resourceLogs":[...]}' | gzip | \
 
 ## Running Tests
 
-### Build and Run All Tests
-
 ```bash
 cd build
-
-# Build tests
-ninja http_server_test log_transformer_test buffer_manager_test
-
-# Run all tests via CTest
+ninja
 ctest --output-on-failure
 
-# Or run individual test executables
-./http_server_test
-./log_transformer_test
-./buffer_manager_test
+./http_server_test        # ingester
+./appender_core_test      # config, decoding, transformation, pipelines, committer, DLQ
+./appender_duckdb_test    # staging and the Iceberg commit SQL, against in-memory DuckDB
 ```
 
-### Test Coverage
-
-| Test Suite | Description |
-|------------|-------------|
+| Test binary | Covers |
+|-------------|--------|
 | `http_server_test` | HTTP endpoint handling, content types, gzip, error cases |
-| `log_transformer_test` | OTel log record transformation |
-| `buffer_manager_test` | Buffer size/time threshold management |
+| `appender_core_test` | Config validation, OTLP protobuf/JSON decoding, transformation, bounded queues, backoff, pipeline ordering/poison/backpressure, commit protocol (retries, indeterminate commits, fencing), DLQ headers |
+| `appender_duckdb_test` | Staging round-trips (quotes, backslashes, NUL, invalid UTF-8), atomic two-table commits, offset recovery |
+
+Tests against live services are opt-in:
+
+```bash
+ICEBERG_IT=1 <appender env vars> ./appender_duckdb_test --gtest_filter='IcebergIntegration*'
+ICEBERG_IT=1 <appender env vars> ../tests/it/iceberg_spike.sh
+E2E=1 ../tests/e2e/exactly_once.sh    # see the script header
+```
 
 ## Development
 
@@ -287,13 +308,16 @@ telemetry-lake/
 │   ├── ingester/           # HTTP receiver components
 │   │   ├── http_server.hpp/cpp
 │   │   └── queue_producer.hpp/cpp
-│   └── appender/           # Kafka consumer components
-│       ├── main.cpp
-│       ├── queue_consumer.hpp/cpp
-│       ├── log_transformer.hpp/cpp
-│       ├── iceberg_appender.hpp/cpp
-│       ├── buffer_manager.hpp/cpp
-│       └── dead_letter_queue.hpp/cpp
+│   └── appender/           # Kafka -> Iceberg appender (see docs/design.md)
+│       ├── main.cpp, app.cpp           # wiring, signals, shutdown order
+│       ├── kafka_source.*              # consumer, rebalance, recovery, backpressure
+│       ├── pipeline_pool.*             # decode -> transform -> stage threads
+│       ├── otlp_decoder.*, log_transformer.*
+│       ├── staging_store.*             # per-partition DuckDB staging generations
+│       ├── iceberg_committer.*         # commit cycles, retries, fencing
+│       ├── duckdb_iceberg.*            # atomic logs+offsets commit, offset store
+│       ├── duckdb_session.*, schema.hpp
+│       ├── dlq_producer.*, health*.*
 ├── tests/                  # Unit tests
 └── docs/                   # Documentation
     └── dev-prompts/        # Development session logs
