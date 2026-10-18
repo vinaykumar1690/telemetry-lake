@@ -405,5 +405,15 @@ target_include_directories(http_server_test PRIVATE
 # Add test to CTest
 add_test(NAME HttpServerTest COMMAND http_server_test)
 
-# The appender targets are defined below once its sources exist
+# Appender: DuckDB-independent core, unit-tested on its own
+add_library(appender_core STATIC
+  src/appender/appender_config.cpp
+)
+target_include_directories(appender_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_executable(appender_core_test
+  tests/appender/test_foundations.cpp
+)
+target_link_libraries(appender_core_test PRIVATE appender_core GTest::gtest GTest::gtest_main)
+add_test(NAME AppenderCoreTest COMMAND appender_core_test)
 

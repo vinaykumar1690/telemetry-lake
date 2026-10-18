@@ -1,0 +1,70 @@
+#ifndef APPENDER_CONFIG_HPP
+#define APPENDER_CONFIG_HPP
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
+
+namespace appender {
+
+// Partition spec of the logs table (on the event timestamp)
+enum class PartitionSpec { Day, Hour, None };
+
+struct AppenderConfig {
+    // Name the Iceberg catalog is attached under inside DuckDB
+    static constexpr std::string_view kCatalogAlias = "lake";
+
+    // Kafka
+    std::string brokers;
+    std::string topic = "otel-logs";
+    std::string consumer_group = "otel-appender";
+    std::string dlq_topic;  // defaults to "<topic>-dlq"
+    int max_poll_interval_ms = 300'000;
+
+    // Iceberg REST catalog
+    std::string catalog_uri;
+    std::string warehouse;  // passed as the ATTACH target; empty for the catalog default
+    std::string iceberg_namespace = "default";
+    std::string table_name = "logs";
+    std::string offsets_table_name = "_appender_offsets";
+    PartitionSpec partition_spec = PartitionSpec::Day;
+
+    // S3-compatible storage
+    std::string s3_endpoint;  // host:port; an http:// or https:// prefix sets s3_use_ssl
+    std::string s3_access_key;
+    std::string s3_secret_key;
+    std::string s3_bucket;
+    std::string s3_region = "us-east-1";
+    std::string s3_url_style = "path";
+    bool s3_use_ssl = false;
+
+    // Buffering: a commit starts when either threshold is reached
+    std::size_t flush_bytes = std::size_t{100} * 1024 * 1024;
+    std::chrono::seconds flush_interval{60};
+    // Staged bytes beyond which pipelines block (backpressure)
+    std::size_t max_staged_bytes = std::size_t{512} * 1024 * 1024;
+    unsigned pipeline_threads = 0;  // 0 = hardware threads, capped at 16
+    std::size_t pipeline_queue_bytes = std::size_t{64} * 1024 * 1024;
+
+    // Iceberg commits
+    int commit_retries = 5;
+    std::chrono::milliseconds retry_base_delay{200};
+    std::chrono::milliseconds retry_max_delay{10'000};
+    std::chrono::seconds revoke_timeout{60};
+    std::chrono::seconds offsets_maintenance_interval{3600};
+
+    std::uint16_t health_port = 8080;
+    std::string appender_id;  // recorded with each offsets row; defaults to the hostname
+
+    // lake."<namespace>"."<table>"
+    std::string qualifiedLogsTable() const;
+    std::string qualifiedOffsetsTable() const;
+
+    static AppenderConfig fromEnv();
+};
+
+}  // namespace appender
+
+#endif  // APPENDER_CONFIG_HPP
