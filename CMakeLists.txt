@@ -172,6 +172,27 @@ else()
     IMPORTED_LOCATION "${DUCKDB_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${DUCKDB_INCLUDE_DIR}"
   )
+
+  # The appender relies on Iceberg multi-table commits and partitioned writes,
+  # and on the fix that keeps written files when a commit's outcome is unknown
+  set(DUCKDB_MIN_VERSION 1.5.4)
+  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/duckdb_version_probe.c
+    "#include <stdio.h>\n#include \"duckdb.h\"\n"
+    "int main(void) { printf(\"%s\", duckdb_library_version()); return 0; }\n")
+  try_run(DUCKDB_PROBE_RUN DUCKDB_PROBE_COMPILE
+    SOURCES ${CMAKE_CURRENT_BINARY_DIR}/duckdb_version_probe.c
+    CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${DUCKDB_INCLUDE_DIR}"
+    LINK_LIBRARIES ${DUCKDB_LIBRARY}
+    RUN_OUTPUT_VARIABLE DUCKDB_VERSION_STRING)
+  string(REGEX REPLACE "^v" "" DUCKDB_VERSION_STRING "${DUCKDB_VERSION_STRING}")
+  if(NOT DUCKDB_PROBE_COMPILE OR NOT DUCKDB_PROBE_RUN EQUAL 0)
+    message(WARNING "Could not determine the DuckDB version; the appender needs >= ${DUCKDB_MIN_VERSION}")
+  elseif(DUCKDB_VERSION_STRING VERSION_LESS DUCKDB_MIN_VERSION)
+    message(FATAL_ERROR "DuckDB ${DUCKDB_VERSION_STRING} found at ${DUCKDB_LIBRARY}; "
+      "the appender needs >= ${DUCKDB_MIN_VERSION} (brew upgrade duckdb, or set DUCKDB_ROOT)")
+  else()
+    message(STATUS "DuckDB version: ${DUCKDB_VERSION_STRING}")
+  endif()
 endif()
 
 # Set up OpenTelemetry protobuf compilation

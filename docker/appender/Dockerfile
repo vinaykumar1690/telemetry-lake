@@ -30,7 +30,7 @@ RUN curl -L -o /tmp/crow.tar.gz \
     && rm -rf /tmp/crow.tar.gz /tmp/Crow-${CROW_VERSION}-Linux
 
 # Download and install pre-built DuckDB library
-ARG DUCKDB_VERSION=v1.4.3
+ARG DUCKDB_VERSION=v1.5.6
 RUN curl -L -o /tmp/libduckdb.zip \
     "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/libduckdb-linux-amd64.zip" \
     && unzip /tmp/libduckdb.zip -d /tmp/duckdb \
@@ -66,7 +66,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Download DuckDB runtime library
-ARG DUCKDB_VERSION=v1.4.3
+ARG DUCKDB_VERSION=v1.5.6
 RUN curl -L -o /tmp/libduckdb.zip \
     "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/libduckdb-linux-amd64.zip" \
     && unzip /tmp/libduckdb.zip -d /tmp/duckdb \

@@ -41,6 +41,8 @@ See [nessie configuration reference](https://projectnessie.org/nessie-latest/con
 brew install duckdb
 ```
 
+The appender needs DuckDB 1.5.4 or newer (Iceberg multi-table commits and partitioned writes); CMake refuses older versions. Run `brew upgrade duckdb` if an older one is installed.
+
 Run `duckdb` and run the following in the sql shell:
 ```
 D INSTALL iceberg;
