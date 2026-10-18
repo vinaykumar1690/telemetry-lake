@@ -209,8 +209,8 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
     // Readiness check endpoint for Kubernetes readiness probe
     CROW_ROUTE(app, "/ready")
         ([queue_producer](){
-            // Check if queue producer is initialized and ready
-            if (queue_producer && !queue_producer->isReady()) {
+            // Not ready without a working producer: accepted data would be dropped
+            if (!queue_producer || !queue_producer->isReady()) {
                 return crow::response(503, "Queue producer not ready");
             }
             return crow::response(200, "OK");
@@ -265,7 +265,7 @@ void HttpServer::setupRoutes(crow::SimpleApp& app) {
                 wrapper.set_payload(req.body);
             }
 
-            // Without a producer (tests), accept and discard
+            // Without a producer (tests only; main() exits instead), accept and discard
             if (!queue_producer) {
                 return okResponse(*media);
             }

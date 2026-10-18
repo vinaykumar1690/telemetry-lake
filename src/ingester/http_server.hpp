@@ -25,7 +25,8 @@ struct HttpServerOptions {
 
 class HttpServer {
 public:
-    // Without a producer, accepted payloads are discarded (used by tests)
+    // Without a producer, accepted payloads are discarded and /ready reports 503
+    // (used by tests)
     HttpServer();
     explicit HttpServer(std::shared_ptr<QueueProducer> queue_producer,
                         HttpServerOptions options = {});

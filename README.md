@@ -118,6 +118,13 @@ Both components are configured via environment variables.
 | `MAX_IN_FLIGHT` | `1000` | Max pending messages before backpressure |
 | `PRODUCER_ACKS` | `-1` | Acks required (-1=all, 1=leader, 0=none) |
 | `PRODUCER_COMPRESSION` | `snappy` | Compression type (snappy/gzip/lz4/zstd) |
+| `HTTP_HOST` | `0.0.0.0` | Address to bind the OTLP/HTTP server to |
+| `HTTP_PORT` | `4318` | OTLP/HTTP port |
+| `HTTP_THREADS` | `0` | HTTP worker threads (0 = one per hardware thread; set to the CPU limit in containers) |
+| `MAX_BODY_BYTES` | `16777216` | Max request body as received; larger requests get 413 |
+| `MAX_DECOMPRESSED_BYTES` | `67108864` | Max payload after gzip decompression; larger payloads get 413 |
+
+Invalid numeric values fail startup instead of falling back to 0. The ingester also exits if the Kafka producer cannot be initialized, so the orchestrator restarts it instead of routing traffic to a pod that would drop data.
 
 ### Appender (otel_appender)
 

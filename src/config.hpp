@@ -2,9 +2,44 @@
 #define CONFIG_HPP
 
 #include <string>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <expected>
+#include <format>
 #include <stdexcept>
+#include <string_view>
+
+namespace config_detail {
+
+// Strict integer parse: the whole string must be a number of type T
+template <typename T>
+std::expected<T, std::errc> parseInteger(std::string_view text) {
+    T value{};
+    const char* end = text.data() + text.size();
+    auto [ptr, ec] = std::from_chars(text.data(), end, value);
+    if (ec != std::errc{}) return std::unexpected(ec);
+    if (ptr != end || text.empty()) return std::unexpected(std::errc::invalid_argument);
+    return value;
+}
+
+// Read an integer env var in [min, max]; unset keeps the default, anything
+// unparsable or out of range throws instead of silently becoming 0
+template <typename T>
+T integerFromEnv(const char* name, T default_value, T min, T max) {
+    const char* raw = std::getenv(name);
+    if (!raw) return default_value;
+    auto parsed = parseInteger<T>(raw);
+    if (!parsed || *parsed < min || *parsed > max) {
+        throw std::runtime_error(std::format("{} must be an integer in [{}, {}], got '{}'",
+                                             name, min, max, raw));
+    }
+    return *parsed;
+}
+
+}  // namespace config_detail
 
 struct IngesterConfig {
     std::string queue_brokers;
@@ -14,7 +49,15 @@ struct IngesterConfig {
     std::string compression_type = "snappy";
     int retry_backoff_ms = 100;
 
+    // HTTP server
+    std::string http_host = "0.0.0.0";
+    std::uint16_t http_port = 4318;
+    unsigned http_threads = 0;  // 0 = one per hardware thread
+    std::size_t max_body_bytes = 16 * 1024 * 1024;
+    std::size_t max_decompressed_bytes = 64 * 1024 * 1024;
+
     static IngesterConfig fromEnv() {
+        using config_detail::integerFromEnv;
         IngesterConfig config;
 
         const char* brokers = std::getenv("KAFKA_BROKERS");
@@ -30,20 +73,23 @@ struct IngesterConfig {
             config.queue_topic = topic;
         }
 
-        const char* max_in_flight_str = std::getenv("MAX_IN_FLIGHT");
-        if (max_in_flight_str) {
-            config.max_in_flight = std::atoi(max_in_flight_str);
-        }
-
-        const char* acks_str = std::getenv("PRODUCER_ACKS");
-        if (acks_str) {
-            config.acks = std::atoi(acks_str);
-        }
+        config.max_in_flight = integerFromEnv("MAX_IN_FLIGHT", config.max_in_flight, 1, 10'000'000);
+        config.acks = integerFromEnv("PRODUCER_ACKS", config.acks, -1, 1000);
 
         const char* compression = std::getenv("PRODUCER_COMPRESSION");
         if (compression) {
             config.compression_type = compression;
         }
+
+        if (const char* host = std::getenv("HTTP_HOST"); host && *host) {
+            config.http_host = host;
+        }
+        config.http_port = integerFromEnv<std::uint16_t>("HTTP_PORT", config.http_port, 1, 65535);
+        config.http_threads = integerFromEnv("HTTP_THREADS", config.http_threads, 0u, 1024u);
+        config.max_body_bytes = integerFromEnv<std::size_t>(
+            "MAX_BODY_BYTES", config.max_body_bytes, 1, std::size_t{1} << 31);
+        config.max_decompressed_bytes = integerFromEnv<std::size_t>(
+            "MAX_DECOMPRESSED_BYTES", config.max_decompressed_bytes, 1, std::size_t{1} << 31);
 
         return config;
     }
