@@ -13,7 +13,6 @@ struct IngesterConfig {
     int acks = -1;  // -1 means all replicas must acknowledge
     std::string compression_type = "snappy";
     int retry_backoff_ms = 100;
-    int max_retries = 3;
 
     static IngesterConfig fromEnv() {
         IngesterConfig config;
