@@ -23,7 +23,7 @@ TEST(LogTransformerTest, BasicTransformation) {
     log_record->set_severity_text("INFO");
     log_record->mutable_body()->set_string_value("Test log message");
     
-    auto transformed = LogTransformer::transform(request);
+    auto transformed = LogTransformer::transform(request, "otel-logs", 0, 42);
     
     ASSERT_EQ(transformed.size(), 1);
     
@@ -60,7 +60,7 @@ TEST(LogTransformerTest, WellKnownAttributes) {
     auto* log_record = scope_logs->add_log_records();
     log_record->set_time_unix_nano(1672531200000000000ULL);
     
-    auto transformed = LogTransformer::transform(request);
+    auto transformed = LogTransformer::transform(request, "otel-logs", 0, 42);
     
     ASSERT_EQ(transformed.size(), 1);
     
@@ -81,7 +81,7 @@ TEST(LogTransformerTest, TraceIdSpanId) {
     log_record->set_trace_id("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10");
     log_record->set_span_id("\x01\x02\x03\x04\x05\x06\x07\x08");
     
-    auto transformed = LogTransformer::transform(request);
+    auto transformed = LogTransformer::transform(request, "otel-logs", 0, 42);
     
     ASSERT_EQ(transformed.size(), 1);
     EXPECT_EQ(transformed[0].trace_id, "0102030405060708090a0b0c0d0e0f10");
@@ -99,7 +99,7 @@ TEST(LogTransformerTest, SeverityFromNumber) {
     log_record->set_severity_number(opentelemetry::proto::logs::v1::SEVERITY_NUMBER_ERROR);
     // No severity_text set
     
-    auto transformed = LogTransformer::transform(request);
+    auto transformed = LogTransformer::transform(request, "otel-logs", 0, 42);
     
     ASSERT_EQ(transformed.size(), 1);
     EXPECT_EQ(transformed[0].severity, "ERROR");
