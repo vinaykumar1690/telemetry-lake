@@ -26,7 +26,15 @@ set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
   opentelemetry_proto
   GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-proto.git
-  GIT_TAG v1.3.1
+  GIT_TAG v1.11.1
+)
+
+# JSON library used by the appender to rewrite OTLP/JSON hex IDs before
+# handing the document to protobuf (it keeps 64-bit integers exact)
+FetchContent_Declare(
+  nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
 
@@ -128,7 +136,7 @@ FetchContent_Declare(
 )
 
 # Make dependencies available (librdkafka must be found before cppkafka)
-FetchContent_MakeAvailable(protobuf opentelemetry_proto cppkafka)
+FetchContent_MakeAvailable(protobuf opentelemetry_proto cppkafka nlohmann_json)
 
 # Find pre-built DuckDB library
 # DuckDB binary distribution should be installed to /usr/local or specified via DUCKDB_ROOT
@@ -348,9 +356,10 @@ add_library(otel_proto STATIC
   ${CUSTOM_PROTO_GENERATED_HDRS}
 )
 target_link_libraries(otel_proto PUBLIC protobuf::libprotobuf)
+# Only the generated headers: the opentelemetry-proto checkout has a file
+# named "version" at its root that would shadow the standard <version> header
 target_include_directories(otel_proto PUBLIC
   ${CMAKE_CURRENT_BINARY_DIR}
-  ${OPENTELEMETRY_PROTO_ROOT}
 )
 
 # Create executable
@@ -408,11 +417,19 @@ add_test(NAME HttpServerTest COMMAND http_server_test)
 # Appender: DuckDB-independent core, unit-tested on its own
 add_library(appender_core STATIC
   src/appender/appender_config.cpp
+  src/appender/log_transformer.cpp
+  src/appender/otlp_decoder.cpp
 )
-target_include_directories(appender_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(appender_core PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/appender
+  ${protobuf_SOURCE_DIR}/src
+)
+target_link_libraries(appender_core PUBLIC otel_proto protobuf::libprotobuf nlohmann_json::nlohmann_json)
 
 add_executable(appender_core_test
   tests/appender/test_foundations.cpp
+  tests/appender/test_transform.cpp
 )
 target_link_libraries(appender_core_test PRIVATE appender_core GTest::gtest GTest::gtest_main)
 add_test(NAME AppenderCoreTest COMMAND appender_core_test)
