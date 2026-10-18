@@ -116,7 +116,7 @@ One in-memory DuckDB instance ([`DuckdbSession`](../src/appender/duckdb_session.
 2. `openIceberg` ([duckdb_session.cpp:122](../src/appender/duckdb_session.cpp#L122)):
    - install and load `httpfs` and `iceberg`
    - `CREATE SECRET` for S3
-   - `ATTACH` the REST catalog as `lake`
+   - `ATTACH` the REST catalog as `lake`, with `ACCESS_DELEGATION_MODE` from `ICEBERG_ACCESS_DELEGATION_MODE`. The default, `none`, makes DuckDB write with the S3 secret above. Otherwise it would build a per-table secret from the storage config the catalog returns, and against Nessie that secret has no keys, so writes get 403 ([integration-testing.md](integration-testing.md#access-delegation-duckdb--catalog))
    - create the namespace
    - [`ensureTable`](../src/appender/duckdb_session.cpp#L67) for both tables: `CREATE TABLE IF NOT EXISTS …`, then compare `DESCRIBE` output with the expected columns. A table with a different shape is a startup error, not something to append to.
 3. Create the DLQ producer, the staging registry, the sink, the committer, the pipelines and the Kafka source, then subscribe.
@@ -324,14 +324,16 @@ When Iceberg is down, the appender stops consuming once `MAX_STAGED_MB` is reach
 ## 9. Known limitations and future work
 
 1. **Ingester acknowledges before durability** ([6.2](#62-client--kafka-ingester)). The fix is to wait for the delivery report before answering. Client retries can also duplicate records; an idempotency key (for example a hash of the payload, or a client-supplied header) carried in the wrapper would let the appender de-duplicate.
-2. **Live-catalog assumptions still need verification**: run `tests/it/iceberg_spike.sh`, the `ICEBERG_IT=1` test and `tests/e2e/exactly_once.sh` against the target stack. They confirm:
-   - Nessie accepts DuckDB's multi-table `transactions/commit`
-   - partitioned writes accept the `TIMESTAMPTZ`/`MAP` columns
-   - which maintenance functions exist
+2. **Live-catalog assumptions were verified locally** (2026-10-18: DuckDB 1.5.6, Nessie latest, Kafka 4.3.1; see [integration-testing.md](integration-testing.md#results-2026-10-18-duckdb-156-nessie-latest-kafka-431)):
+   - Nessie accepts DuckDB's two-table insert as one `transactions/commit`
+   - partitioned `day()` writes accept the `TIMESTAMPTZ`/`MAP` columns
+   - the e2e test passed
 
-   Fallbacks:
-   - if Nessie rejects the multi-table commit: another catalog (Lakekeeper, Polaris), or recovery from `_ingested_at`-bounded scans of the logs table
-   - if the column types are rejected: `TIMESTAMP` or JSON-encoded maps
+   Two caveats remain:
+   - DuckDB 1.5.6 has **no** Iceberg maintenance functions, so `prune` never runs and `_appender_offsets` gains one small file per commit until an external job compacts it
+   - any other target catalog must be checked again with the same tests
+
+   If a catalog rejects multi-table commits, the fallback is recovery from `_ingested_at`-bounded scans of the logs table.
 3. **Zombie window** after a client-side commit timeout ([6.4](#64-rebalances-and-fencing)).
 4. **Table maintenance** of `logs` (compaction of the roughly one file per partition-day per commit, snapshot expiry) is external.
 5. **Schema evolution** is not automated. A schema mismatch stops startup.
@@ -345,5 +347,5 @@ When Iceberg is down, the appender stops consuming once `MAX_STAGED_MB` is reach
 | `http_server_test` | ingester status codes, limits, encodings, OTLP error bodies |
 | `appender_core_test` | config validation; protobuf/JSON decoding, including hex IDs, int64 nanos and unknown fields; transformation; bounded queue and backoff. Pipelines: per-partition ordering, poison → DLQ before the offset moves, a DLQ outage blocking rather than skipping, abort semantics, backpressure, drop on revoke. Committer: triggers, retries, landed and unlanded indeterminate commits, unverifiable outcomes never recommitted, fencing (including interrupting backoff), discard, final flush |
 | `appender_duckdb_test` | staging round-trips (quotes, backslashes, NUL, emoji, invalid UTF-8, duplicate MAP keys, NULLs), generation sealing, offset-only advances, atomic two-table commit (a failure in the offsets insert leaves the logs table unchanged), recovery query |
-| `ICEBERG_IT=1` test, `tests/it/iceberg_spike.sh` | the same against a live REST catalog + S3 |
+| `ICEBERG_IT=1` test, `tests/it/iceberg_spike.sh` | the same against a live REST catalog + S3 (setup: [integration-testing.md](integration-testing.md)) |
 | `tests/e2e/exactly_once.sh` (`E2E=1`) | sequenced records through the whole pipeline with SIGKILL, SIGTERM and a rebalance; asserts every record exactly once and the poison messages in the DLQ |

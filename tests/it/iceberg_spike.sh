@@ -29,7 +29,7 @@ CREATE SECRET s3 (TYPE S3, KEY_ID '${S3_ACCESS_KEY}', SECRET '${S3_SECRET_KEY}',
                   ENDPOINT '${S3_ENDPOINT#http*://}', REGION '${S3_REGION:-us-east-1}',
                   USE_SSL false, URL_STYLE 'path');
 ATTACH '${ICEBERG_WAREHOUSE:-}' AS lake (TYPE ICEBERG, ENDPOINT '${ICEBERG_CATALOG_URI}',
-                                        AUTHORIZATION_TYPE 'none');
+                                        AUTHORIZATION_TYPE 'none', ACCESS_DELEGATION_MODE 'none');
 CREATE SCHEMA lake.${NS};
 
 -- 1. Partitioned table with the column types the appender uses
@@ -61,7 +61,7 @@ CREATE SECRET s3 (TYPE S3, KEY_ID '${S3_ACCESS_KEY}', SECRET '${S3_SECRET_KEY}',
                   ENDPOINT '${S3_ENDPOINT#http*://}', REGION '${S3_REGION:-us-east-1}',
                   USE_SSL false, URL_STYLE 'path');
 ATTACH '${ICEBERG_WAREHOUSE:-}' AS lake (TYPE ICEBERG, ENDPOINT '${ICEBERG_CATALOG_URI}',
-                                        AUTHORIZATION_TYPE 'none');
+                                        AUTHORIZATION_TYPE 'none', ACCESS_DELEGATION_MODE 'none');
 BEGIN;
 INSERT INTO lake.${NS}.logs VALUES (0, 3, now(), MAP {});
 INSERT INTO lake.${NS}.offsets VALUES ('not a number', 3);
@@ -75,7 +75,7 @@ CREATE SECRET s3 (TYPE S3, KEY_ID '${S3_ACCESS_KEY}', SECRET '${S3_SECRET_KEY}',
                   ENDPOINT '${S3_ENDPOINT#http*://}', REGION '${S3_REGION:-us-east-1}',
                   USE_SSL false, URL_STYLE 'path');
 ATTACH '${ICEBERG_WAREHOUSE:-}' AS lake (TYPE ICEBERG, ENDPOINT '${ICEBERG_CATALOG_URI}',
-                                        AUTHORIZATION_TYPE 'none');
+                                        AUTHORIZATION_TYPE 'none', ACCESS_DELEGATION_MODE 'none');
 SELECT 'after failed txn (expect 2, 1)', (SELECT count(*) FROM lake.${NS}.logs),
        (SELECT count(*) FROM lake.${NS}.offsets);
 SELECT 'backslash round-trip (expect v\\w)', attrs['k'] FROM lake.${NS}.logs WHERE _kafka_offset = 1;

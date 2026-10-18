@@ -1,0 +1,49 @@
+# Local stack for the live integration tests (see docs/integration-testing.md).
+# MinIO runs on the host (Homebrew): MinIO no longer publishes public images.
+# Start everything with tests/it/stack.sh up.
+name: telemetry-lake-it
+
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      retries: 20
+
+  nessie:
+    image: ghcr.io/projectnessie/nessie:${NESSIE_TAG:-latest}
+    ports:
+      - "19120:19120"
+    environment:
+      # Map keys (the warehouse name) are only read from the upper-case env form
+      nessie.catalog.default-warehouse: telemetrylakeit
+      NESSIE_CATALOG_WAREHOUSES_TELEMETRYLAKEIT_LOCATION: s3://telemetrylakeit
+      nessie.catalog.service.s3.default-options.region: us-east-1
+      # Nessie reaches MinIO through Docker's host gateway; clients use the external endpoint
+      nessie.catalog.service.s3.default-options.endpoint: http://host.docker.internal:9000
+      nessie.catalog.service.s3.default-options.external-endpoint: http://localhost:9000
+      nessie.catalog.service.s3.default-options.path-style-access: "true"
+      nessie.catalog.service.s3.default-options.auth-type: STATIC
+      # DuckDB cannot use S3 remote signing; clients sign with their own S3 secret
+      nessie.catalog.service.s3.default-options.request-signing-enabled: "false"
+      nessie.catalog.service.s3.default-options.access-key: urn:nessie-secret:quarkus:it-secrets.s3
+      it-secrets.s3.name: ${S3_ACCESS_KEY:-minioadmin}
+      it-secrets.s3.secret: ${S3_SECRET_KEY:-minioadmin}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

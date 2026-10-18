@@ -19,7 +19,7 @@ ctest --output-on-failure
 ./appender_duckdb_test   # Staging and commit SQL against in-memory DuckDB
 ```
 
-Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`); see README.md.
+Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`); the local stack (`tests/it/stack.sh up`) and prerequisites are in docs/integration-testing.md.
 
 The `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` flag is required for cppkafka compatibility.
 

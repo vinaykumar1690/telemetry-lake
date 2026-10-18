@@ -159,6 +159,7 @@ Also cap the request body at your ingress (for example nginx `client_max_body_si
 | `ICEBERG_NAMESPACE` | `default` | Namespace of both tables |
 | `ICEBERG_TABLE_NAME` | `logs` | Logs table |
 | `ICEBERG_OFFSETS_TABLE` | `_appender_offsets` | Offsets table (source of truth for recovery) |
+| `ICEBERG_ACCESS_DELEGATION_MODE` | `none` | `none` writes with `S3_ACCESS_KEY`/`S3_SECRET_KEY`; `vended_credentials` uses the storage config the catalog returns |
 | `ICEBERG_PARTITION_SPEC` | `day` | `day`, `hour` or `none` partitioning of the logs table on `timestamp` |
 | `S3_ENDPOINT` | (required) | S3/MinIO endpoint; an `https://` prefix enables TLS |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | (required) | S3 credentials |
@@ -285,12 +286,14 @@ ctest --output-on-failure
 | `appender_core_test` | Config validation, OTLP protobuf/JSON decoding, transformation, bounded queues, backoff, pipeline ordering/poison/backpressure, commit protocol (retries, indeterminate commits, fencing), DLQ headers |
 | `appender_duckdb_test` | Staging round-trips (quotes, backslashes, NUL, invalid UTF-8), atomic two-table commits, offset recovery |
 
-Tests against live services are opt-in:
+Tests against live Kafka, Nessie and MinIO are opt-in. Prerequisites, the
+local stack and expected results are in [docs/integration-testing.md](docs/integration-testing.md):
 
 ```bash
-ICEBERG_IT=1 <appender env vars> ./appender_duckdb_test --gtest_filter='IcebergIntegration*'
-ICEBERG_IT=1 <appender env vars> ../tests/it/iceberg_spike.sh
-E2E=1 ../tests/e2e/exactly_once.sh    # see the script header
+tests/it/stack.sh up && eval "$(tests/it/stack.sh env)"   # from the repo root
+ICEBERG_IT=1 tests/it/iceberg_spike.sh
+(cd build && ICEBERG_IT=1 ./appender_duckdb_test --gtest_filter='IcebergIntegration*')
+E2E=1 tests/e2e/exactly_once.sh
 ```
 
 ## Development

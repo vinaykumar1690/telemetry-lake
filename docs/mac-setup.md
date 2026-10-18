@@ -1,3 +1,7 @@
+For the integration-test stack (Kafka + Nessie in Docker, MinIO on the host),
+see [integration-testing.md](integration-testing.md). The steps below set
+the services up by hand.
+
 ## Setup minio (object store for the datalake)
 
 ```
@@ -26,6 +30,7 @@ docker run -p 19120:19120 \
         -e NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_ENDPOINT=http://host.docker.internal:9000 \
         -e NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_PATH-STYLE_ACCESS=true \
         -e NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_AUTH-TYPE=STATIC \
+        -e NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_REQUEST-SIGNING-ENABLED=false \
         -e NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_ACCESS-KEY=urn:nessie-secret:quarkus:my-secrets.s3-default \
         -e MY-SECRETS_S3-DEFAULT_NAME=minioadmin \
         -e MY-SECRETS_S3-DEFAULT_SECRET=minioadmin \
@@ -67,7 +72,8 @@ Next attach to the nessie catalog named telemetrylake that was created from the 
 D ATTACH 'telemetrylake' AS telemetrylake (
       TYPE ICEBERG,
       ENDPOINT 'http://0.0.0.0:19120/iceberg/',
-      AUTHORIZATION_TYPE 'NONE'
+      AUTHORIZATION_TYPE 'NONE',
+      ACCESS_DELEGATION_MODE 'none'   -- use the secret above, not catalog-vended config
   );
 ```
 
