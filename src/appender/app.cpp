@@ -13,7 +13,7 @@
 #include <csignal>
 #include <format>
 #include <iostream>
-#include <pthread.h>
+#include <unistd.h>
 #include <thread>
 
 namespace appender {
@@ -123,6 +123,7 @@ int runAppender(const AppenderConfig& config) {
     health.start();
 
     // The only thread that receives SIGINT/SIGTERM/SIGUSR1 (blocked elsewhere)
+    std::atomic<bool> signals_done = false;
     std::thread signals([&] {
         sigset_t set;
         sigemptyset(&set);
@@ -139,6 +140,7 @@ int runAppender(const AppenderConfig& config) {
             }
             std::cout << std::format("Signal {}: shutting down\n", signal);
             source.stop();
+            signals_done = true;
             return;
         }
     });
@@ -154,7 +156,10 @@ int runAppender(const AppenderConfig& config) {
     committer.stop();
     source.shutdown();
     health.stop();
-    pthread_kill(signals.native_handle(), SIGTERM);  // no-op if it already returned
+    // Wake the sigwait thread if no signal ended the run (e.g. a fatal error).
+    // Every thread blocks SIGTERM, so it stays pending for sigwait; if that
+    // thread already returned it simply stays pending until exit.
+    if (!signals_done) ::kill(::getpid(), SIGTERM);
     signals.join();
 
     const bool failed = fatal || committer.stats().fatal;
