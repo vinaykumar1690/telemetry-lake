@@ -2,6 +2,7 @@
 #define CONFIG_HPP
 
 #include <string>
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -54,7 +55,19 @@ struct IngesterConfig {
     std::uint16_t http_port = 4318;
     unsigned http_threads = 0;  // 0 = one per hardware thread
     std::size_t max_body_bytes = 16 * 1024 * 1024;
-    std::size_t max_decompressed_bytes = 64 * 1024 * 1024;
+    // Each accepted payload becomes one Kafka message; the producer's
+    // message.max.bytes is derived from these limits (see kafkaMessageMaxBytes)
+    std::size_t max_decompressed_bytes = 16 * 1024 * 1024;
+
+    // Room for the RawTelemetryMessage wrapper fields and Kafka record overhead
+    static constexpr std::size_t kKafkaMessageOverheadBytes = 64 * 1024;
+    // Upper bound for both body limits (librdkafka allows at most 1,000,000,000)
+    static constexpr std::size_t kMaxPayloadLimitBytes = std::size_t{512} * 1024 * 1024;
+
+    // Largest Kafka message the ingester can produce
+    std::size_t kafkaMessageMaxBytes() const {
+        return std::max(max_body_bytes, max_decompressed_bytes) + kKafkaMessageOverheadBytes;
+    }
 
     static IngesterConfig fromEnv() {
         using config_detail::integerFromEnv;
@@ -87,9 +100,9 @@ struct IngesterConfig {
         config.http_port = integerFromEnv<std::uint16_t>("HTTP_PORT", config.http_port, 1, 65535);
         config.http_threads = integerFromEnv("HTTP_THREADS", config.http_threads, 0u, 1024u);
         config.max_body_bytes = integerFromEnv<std::size_t>(
-            "MAX_BODY_BYTES", config.max_body_bytes, 1, std::size_t{1} << 31);
+            "MAX_BODY_BYTES", config.max_body_bytes, 1, kMaxPayloadLimitBytes);
         config.max_decompressed_bytes = integerFromEnv<std::size_t>(
-            "MAX_DECOMPRESSED_BYTES", config.max_decompressed_bytes, 1, std::size_t{1} << 31);
+            "MAX_DECOMPRESSED_BYTES", config.max_decompressed_bytes, 1, kMaxPayloadLimitBytes);
 
         return config;
     }

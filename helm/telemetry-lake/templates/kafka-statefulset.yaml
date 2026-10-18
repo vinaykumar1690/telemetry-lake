@@ -51,6 +51,8 @@ spec:
               transaction.state.log.replication.factor=1
               transaction.state.log.min.isr=1
               log.retention.hours={{ .Values.kafka.config.logRetentionHours }}
+              message.max.bytes={{ int .Values.kafka.config.messageMaxBytes }}
+              replica.fetch.max.bytes={{ int .Values.kafka.config.messageMaxBytes }}
               EOF
 
               # Format storage if not already done

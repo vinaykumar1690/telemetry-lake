@@ -65,7 +65,10 @@ bool QueueProducer::initialize() {
         set("queue.buffering.max.kbytes", "1048576") &&  // 1GB
         set("batch.num.messages", "1000") &&
         set("linger.ms", "10") &&
-        set("enable.idempotence", "true");
+        set("enable.idempotence", "true") &&
+        // Must admit the largest payload the HTTP layer accepts, so oversized
+        // requests get 413 there instead of failing in librdkafka
+        set("message.max.bytes", std::to_string(config_.kafkaMessageMaxBytes()));
     if (!configured) {
         rd_kafka_conf_destroy(conf);
         return false;

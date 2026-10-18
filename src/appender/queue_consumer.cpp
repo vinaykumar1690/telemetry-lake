@@ -24,6 +24,9 @@ bool QueueConsumer::initialize() {
             {"enable.auto.commit", "false"},  // Manual commit for at-least-once semantics
             {"auto.offset.reset", "earliest"},
             {"enable.partition.eof", "false"},
+            // fetch.max.bytes / receive.message.max.bytes are left at librdkafka's
+            // defaults (50 MB / 100 MB); they must stay above the ingester's
+            // message.max.bytes (16 MiB + 64 KiB by default)
         });
 
         // Create consumer

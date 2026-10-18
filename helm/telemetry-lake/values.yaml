@@ -17,6 +17,10 @@ kafka:
     defaultReplicationFactor: 1
     # Log retention hours
     logRetentionHours: 1
+    # Largest record batch the broker accepts (16 MiB + 1 MiB headroom). Must be
+    # >= the ingester's message.max.bytes (max(limits) + 64 KiB), otherwise large
+    # payloads are acknowledged over HTTP and then fail delivery.
+    messageMaxBytes: 17825792
   # Topic for telemetry log events
   topics:
     logs: telemetry-logs
@@ -95,6 +99,13 @@ ingester:
     maxInFlight: 1000
     acks: -1  # -1=all, 1=leader, 0=none
     compression: "snappy"
+  # Request size limits; each accepted payload becomes one Kafka message
+  limits:
+    maxBodyBytes: 16777216          # 16 MiB as received
+    maxDecompressedBytes: 16777216  # 16 MiB after gzip decompression
+  # HTTP worker threads. Set to the CPU limit: the default (one per node CPU)
+  # oversubscribes the container and multiplies peak per-request memory.
+  httpThreads: 2
   resources:
     requests:
       memory: "128Mi"

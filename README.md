@@ -122,9 +122,29 @@ Both components are configured via environment variables.
 | `HTTP_PORT` | `4318` | OTLP/HTTP port |
 | `HTTP_THREADS` | `0` | HTTP worker threads (0 = one per hardware thread; set to the CPU limit in containers) |
 | `MAX_BODY_BYTES` | `16777216` | Max request body as received; larger requests get 413 |
-| `MAX_DECOMPRESSED_BYTES` | `67108864` | Max payload after gzip decompression; larger payloads get 413 |
+| `MAX_DECOMPRESSED_BYTES` | `16777216` | Max payload after gzip decompression; larger payloads get 413 |
 
 Invalid numeric values fail startup instead of falling back to 0. The ingester also exits if the Kafka producer cannot be initialized, so the orchestrator restarts it instead of routing traffic to a pod that would drop data.
+
+#### Message size limits
+
+Each accepted request becomes one Kafka message containing the **decompressed** payload. OpenTelemetry Collector batches (8192 records by default) are commonly 2–8 MB uncompressed, well above Kafka's ~1 MB defaults, so the limits are raised end to end:
+
+| Layer | Setting | Default here |
+|-------|---------|--------------|
+| Ingester HTTP | `MAX_BODY_BYTES`, `MAX_DECOMPRESSED_BYTES` | 16 MiB each |
+| Ingester producer | librdkafka `message.max.bytes` | derived: max of the two limits + 64 KiB |
+| Broker / topic | `message.max.bytes` / topic `max.message.bytes` | 17 MiB (Helm `kafka.config.messageMaxBytes`) |
+| Appender consumer | librdkafka `fetch.max.bytes` / `receive.message.max.bytes` | librdkafka defaults (50 MB / 100 MB) |
+
+When using an **external** Kafka, raise the topic limit yourself, otherwise large payloads are acknowledged over HTTP and then fail delivery (visible only in the ingester's delivery-failure log):
+
+```bash
+kafka-configs.sh --bootstrap-server <broker> --alter --entity-type topics \
+  --entity-name <topic> --add-config max.message.bytes=17825792
+```
+
+Also cap the request body at your ingress (for example nginx `client_max_body_size 16m`): the HTTP server reads the whole body into memory before it can check `MAX_BODY_BYTES`.
 
 ### Appender (otel_appender)
 

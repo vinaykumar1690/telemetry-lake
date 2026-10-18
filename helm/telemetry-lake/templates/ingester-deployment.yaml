@@ -39,6 +39,13 @@ spec:
               value: {{ .Values.ingester.kafka.acks | quote }}
             - name: PRODUCER_COMPRESSION
               value: {{ .Values.ingester.kafka.compression | quote }}
+            # HTTP server
+            - name: HTTP_THREADS
+              value: {{ .Values.ingester.httpThreads | quote }}
+            - name: MAX_BODY_BYTES
+              value: {{ int .Values.ingester.limits.maxBodyBytes | quote }}
+            - name: MAX_DECOMPRESSED_BYTES
+              value: {{ int .Values.ingester.limits.maxDecompressedBytes | quote }}
           resources:
             {{- toYaml .Values.ingester.resources | nindent 12 }}
           livenessProbe:

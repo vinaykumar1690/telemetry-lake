@@ -17,8 +17,9 @@ struct HttpServerOptions {
     // Limit on the request body as received (before decompression). Crow buffers
     // the whole body before routing, so also cap it at the ingress/proxy.
     std::size_t max_body_bytes = 16 * 1024 * 1024;
-    // Limit on the payload after gzip decompression (decompression-bomb guard)
-    std::size_t max_decompressed_bytes = 64 * 1024 * 1024;
+    // Limit on the payload after gzip decompression (decompression-bomb guard).
+    // The payload becomes one Kafka message, so keep this within message.max.bytes.
+    std::size_t max_decompressed_bytes = 16 * 1024 * 1024;
     std::string server_name = "telemetry-lake-ingester";
     crow::LogLevel log_level = crow::LogLevel::Warning;
 };
