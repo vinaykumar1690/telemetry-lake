@@ -2,6 +2,8 @@
 #include "ingester/http_server.hpp"
 #include "crow.h"
 #include <zlib.h>
+#include <memory>
+#include <google/protobuf/util/json_util.h>
 #include "google/rpc/status.pb.h"
 #include "telemetry_wrapper.pb.h"
 #include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
@@ -401,4 +403,191 @@ TEST_F(HttpServerTest, HandlesCaseInsensitiveContentType) {
     EXPECT_EQ(res.code, 200);
 }
 
+// Fixture for tests that need non-default server limits
+class HttpServerLimitsTest : public ::testing::Test {
+protected:
+    void configure(HttpServerOptions options) {
+        server = std::make_unique<HttpServer>(nullptr, std::move(options));
+        server->setupRoutes(app);
+        app.validate();
+    }
 
+    crow::response post(const std::string& body, const std::string& content_type,
+                        const std::string& content_encoding = "") {
+        crow::request req;
+        req.url = "/v1/logs";
+        req.method = "POST"_method;
+        req.body = body;
+        req.add_header("Content-Type", content_type);
+        if (!content_encoding.empty()) req.add_header("Content-Encoding", content_encoding);
+        crow::response res;
+        app.handle_full(req, res);
+        return res;
+    }
+
+    std::unique_ptr<HttpServer> server;
+    crow::SimpleApp app;
+};
+
+static google::rpc::Status parseStatus(const crow::response& res) {
+    google::rpc::Status status;
+    EXPECT_TRUE(status.ParseFromString(res.body));
+    return status;
+}
+
+// Raw body larger than max_body_bytes is rejected before any processing
+TEST_F(HttpServerLimitsTest, RejectsBodyOverLimit) {
+    HttpServerOptions options;
+    options.max_body_bytes = 16;
+    configure(options);
+
+    EXPECT_EQ(post(std::string(16, 'x'), "application/x-protobuf").code, 200);
+
+    crow::response res = post(std::string(17, 'x'), "application/x-protobuf");
+    EXPECT_EQ(res.code, 413);
+    EXPECT_EQ(parseStatus(res).message(), "Payload Too Large");
+}
+
+// A small gzip body that inflates past max_decompressed_bytes is rejected
+TEST_F(HttpServerLimitsTest, RejectsGzipBomb) {
+    HttpServerOptions options;
+    options.max_decompressed_bytes = 64 * 1024;
+    configure(options);
+
+    std::string bomb = compressGzip(std::string(8 * 1024 * 1024, '\0'));
+    ASSERT_LT(bomb.size(), 64u * 1024);
+
+    crow::response res = post(bomb, "application/x-protobuf", "gzip");
+    EXPECT_EQ(res.code, 413);
+    EXPECT_EQ(parseStatus(res).message(), "Payload Too Large after decompression");
+}
+
+// Decompressed size exactly at the limit is accepted, one byte over is not
+TEST_F(HttpServerLimitsTest, DecompressedLimitIsInclusive) {
+    HttpServerOptions options;
+    options.max_decompressed_bytes = 100000;
+    configure(options);
+
+    EXPECT_EQ(post(compressGzip(std::string(100000, 'a')), "application/x-protobuf", "gzip").code, 200);
+    EXPECT_EQ(post(compressGzip(std::string(100001, 'a')), "application/x-protobuf", "gzip").code, 413);
+}
+
+// Large payload exercises buffer growth across several inflate rounds
+TEST_F(HttpServerLimitsTest, HandlesLargeGzipPayload) {
+    configure({});
+
+    std::string data;
+    data.reserve(4 * 1024 * 1024);
+    uint32_t x = 12345;
+    while (data.size() < 4 * 1024 * 1024) {
+        x = x * 1103515245 + 12345;
+        data.push_back(static_cast<char>('a' + (x >> 16) % 26));
+    }
+    EXPECT_EQ(post(compressGzip(data), "application/x-protobuf", "gzip").code, 200);
+}
+
+// Concatenated gzip members (RFC 1952) are all inflated, not just the first
+TEST_F(HttpServerLimitsTest, HandlesMultiMemberGzip) {
+    HttpServerOptions options;
+    options.max_decompressed_bytes = 11;  // "hello " + "world"
+    configure(options);
+
+    std::string two_members = compressGzip("hello ") + compressGzip("world");
+    EXPECT_EQ(post(two_members, "application/x-protobuf", "gzip").code, 200);
+
+    // A third member pushes the total past the limit, proving later members are read
+    std::string three_members = two_members + compressGzip("!");
+    EXPECT_EQ(post(three_members, "application/x-protobuf", "gzip").code, 413);
+}
+
+TEST_F(HttpServerLimitsTest, RejectsTruncatedGzip) {
+    configure({});
+    std::string gz = compressGzip(std::string(1000, 'a'));
+    gz.resize(gz.size() - 5);
+
+    crow::response res = post(gz, "application/x-protobuf", "gzip");
+    EXPECT_EQ(res.code, 400);
+    EXPECT_EQ(parseStatus(res).message(), "Failed to decompress gzip payload");
+}
+
+TEST_F(HttpServerLimitsTest, RejectsTrailingGarbageAfterGzip) {
+    configure({});
+    EXPECT_EQ(post(compressGzip("payload") + "garbage", "application/x-protobuf", "gzip").code, 400);
+}
+
+// Content codings other than gzip/identity must not be forwarded still encoded
+TEST_F(HttpServerLimitsTest, RejectsUnsupportedContentEncoding) {
+    configure({});
+    for (const char* encoding : {"br", "deflate", "zstd", "gzip, br"}) {
+        crow::response res = post("payload", "application/x-protobuf", encoding);
+        EXPECT_EQ(res.code, 415) << encoding;
+        EXPECT_EQ(parseStatus(res).message(), "Unsupported Content-Encoding") << encoding;
+    }
+}
+
+TEST_F(HttpServerLimitsTest, AcceptsIdentityAndXGzipEncodings) {
+    configure({});
+    EXPECT_EQ(post("payload", "application/x-protobuf", "identity").code, 200);
+    EXPECT_EQ(post(compressGzip("payload"), "application/x-protobuf", "x-gzip").code, 200);
+}
+
+// Error bodies use the request's encoding: JSON request -> JSON google.rpc.Status
+TEST_F(HttpServerLimitsTest, JsonErrorBodyIsJsonStatus) {
+    configure({});
+    crow::response res = post("not gzip", "application/json", "gzip");
+    EXPECT_EQ(res.code, 400);
+    EXPECT_EQ(res.get_header_value("Content-Type"), "application/json");
+
+    google::rpc::Status status;
+    ASSERT_TRUE(google::protobuf::util::JsonStringToMessage(res.body, &status).ok()) << res.body;
+    EXPECT_EQ(status.code(), 3);
+    EXPECT_EQ(status.message(), "Failed to decompress gzip payload");
+}
+
+// Unknown media type: error falls back to protobuf-encoded Status
+TEST_F(HttpServerLimitsTest, UnsupportedMediaTypeReturnsProtobufStatus) {
+    configure({});
+    crow::response res = post("payload", "text/plain");
+    EXPECT_EQ(res.code, 415);
+    EXPECT_EQ(res.get_header_value("Content-Type"), "application/x-protobuf");
+    EXPECT_EQ(parseStatus(res).message(), "Unsupported Media Type");
+}
+
+// HTTP optional whitespace includes horizontal tabs
+TEST_F(HttpServerLimitsTest, HandlesTabsInContentType) {
+    configure({});
+    for (const char* content_type : {"application/json;\tcharset=utf-8",
+                                     "\tapplication/json\t; charset=utf-8",
+                                     " Application/JSON "}) {
+        crow::response res = post("{}", content_type);
+        EXPECT_EQ(res.code, 200) << content_type;
+        EXPECT_EQ(res.get_header_value("Content-Type"), "application/json") << content_type;
+    }
+}
+
+TEST_F(HttpServerLimitsTest, RejectsNonPostMethod) {
+    configure({});
+    crow::request req;
+    req.url = "/v1/logs";
+    req.method = "GET"_method;
+    crow::response res;
+    app.handle_full(req, res);
+    EXPECT_EQ(res.code, 405);
+}
+
+TEST_F(HttpServerTest, HealthIsOkWithoutProducer) {
+    crow::request req;
+    req.url = "/health";
+    crow::response res;
+    app.handle_full(req, res);
+    EXPECT_EQ(res.code, 200);
+}
+
+// A pod without a working producer would drop data, so it must not report ready
+TEST_F(HttpServerTest, ReadyReturns503WithoutProducer) {
+    crow::request req;
+    req.url = "/ready";
+    crow::response res;
+    app.handle_full(req, res);
+    EXPECT_EQ(res.code, 503);
+}
