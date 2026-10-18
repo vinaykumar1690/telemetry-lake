@@ -82,6 +82,13 @@ AppenderConfig AppenderConfig::fromEnv() {
     optionalEnv("ICEBERG_TABLE_NAME", config.table_name);
     optionalEnv("ICEBERG_OFFSETS_TABLE", config.offsets_table_name);
     config.partition_spec = partitionSpecFromEnv(config.partition_spec);
+    optionalEnv("ICEBERG_ACCESS_DELEGATION_MODE", config.access_delegation_mode);
+    if (config.access_delegation_mode != "none" &&
+        config.access_delegation_mode != "vended_credentials") {
+        throw std::runtime_error(std::format(
+            "ICEBERG_ACCESS_DELEGATION_MODE must be none or vended_credentials; got '{}'",
+            config.access_delegation_mode));
+    }
     if (config.table_name == config.offsets_table_name) {
         throw std::runtime_error("ICEBERG_TABLE_NAME and ICEBERG_OFFSETS_TABLE must differ");
     }

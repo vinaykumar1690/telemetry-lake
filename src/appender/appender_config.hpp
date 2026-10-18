@@ -30,6 +30,9 @@ struct AppenderConfig {
     std::string table_name = "logs";
     std::string offsets_table_name = "_appender_offsets";
     PartitionSpec partition_spec = PartitionSpec::Day;
+    // "none": write with the S3 credentials below; "vended_credentials": use
+    // the storage config the catalog returns per table
+    std::string access_delegation_mode = "none";
 
     // S3-compatible storage
     std::string s3_endpoint;  // host:port; an http:// or https:// prefix sets s3_use_ssl

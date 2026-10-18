@@ -2,6 +2,7 @@
 #include "appender_config.hpp"
 
 #include <csignal>
+#include <cstdio>
 #include <format>
 #include <iostream>
 #include <pthread.h>
@@ -15,6 +16,10 @@ int main() {
     sigaddset(&signals, SIGTERM);
     sigaddset(&signals, SIGUSR1);
     pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+
+    // Line-buffer stdout even when it is a pipe or file (containers), so log
+    // lines are not lost on a crash
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
     appender::AppenderConfig config;
     try {

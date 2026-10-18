@@ -140,9 +140,10 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const Appender
                     sql::literal(config.s3_access_key), sql::literal(config.s3_secret_key),
                     sql::literal(config.s3_region), sql::literal(config.s3_endpoint),
                     config.s3_use_ssl ? "true" : "false", sql::literal(config.s3_url_style)),
-        std::format("ATTACH {} AS {} (TYPE ICEBERG, ENDPOINT {}, AUTHORIZATION_TYPE 'none')",
+        std::format("ATTACH {} AS {} (TYPE ICEBERG, ENDPOINT {}, AUTHORIZATION_TYPE 'none', "
+                    "ACCESS_DELEGATION_MODE {})",
                     sql::literal(config.warehouse), AppenderConfig::kCatalogAlias,
-                    sql::literal(config.catalog_uri)),
+                    sql::literal(config.catalog_uri), sql::literal(config.access_delegation_mode)),
         std::format("CREATE SCHEMA IF NOT EXISTS {}.{}", AppenderConfig::kCatalogAlias,
                     sql::identifier(config.iceberg_namespace)),
     };

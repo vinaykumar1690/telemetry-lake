@@ -57,7 +57,8 @@ void setRequired(ScopedEnv& env) {
                              "MAX_POLL_INTERVAL_MS", "ICEBERG_COMMIT_RETRIES",
                              "ICEBERG_TABLE_NAME", "ICEBERG_OFFSETS_TABLE", "ICEBERG_NAMESPACE",
                              "ICEBERG_RETRY_BASE_DELAY_MS", "ICEBERG_RETRY_MAX_DELAY_MS",
-                             "S3_URL_STYLE", "APPENDER_ID", "ICEBERG_WAREHOUSE"}) {
+                             "S3_URL_STYLE", "APPENDER_ID", "ICEBERG_WAREHOUSE",
+                             "ICEBERG_ACCESS_DELEGATION_MODE"}) {
         env.unset(name);
     }
 }
@@ -71,6 +72,7 @@ TEST(AppenderConfigTest, Defaults) {
     EXPECT_EQ(config.topic, "otel-logs");
     EXPECT_EQ(config.dlq_topic, "otel-logs-dlq");
     EXPECT_EQ(config.partition_spec, PartitionSpec::Day);
+    EXPECT_EQ(config.access_delegation_mode, "none");
     EXPECT_EQ(config.flush_bytes, 100u * 1024 * 1024);
     EXPECT_GE(config.pipeline_threads, 1u);
     EXPECT_LE(config.pipeline_threads, 16u);
@@ -111,6 +113,9 @@ TEST(AppenderConfigTest, RejectsInvalidValues) {
     env.unset("ICEBERG_COMMIT_RETRIES");
 
     env.set("ICEBERG_PARTITION_SPEC", "week");
+    EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error);
+    env.unset("ICEBERG_PARTITION_SPEC");
+    env.set("ICEBERG_ACCESS_DELEGATION_MODE", "remote_signing");
     EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error);
 }
 
