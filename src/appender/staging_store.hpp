@@ -3,6 +3,8 @@
 
 #include "error.hpp"
 #include "log_row.hpp"
+#include "sealed_buffer.hpp"
+#include "sink.hpp"
 
 #include "duckdb_include.hpp"
 
@@ -40,15 +42,6 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable below_cap_;
     std::size_t used_ = 0;
-};
-
-// A staging generation handed from a partition to the committer
-struct SealedBuffer {
-    std::int32_t partition = 0;
-    std::string table;
-    std::int64_t max_offset = -1;
-    std::size_t rows = 0;
-    std::size_t bytes = 0;
 };
 
 // Rows of one Kafka partition waiting for the next commit. Appends go into
@@ -99,7 +92,7 @@ private:
 };
 
 // The staging buffers of all partitions currently assigned to this process
-class StagingRegistry {
+class StagingRegistry : public StagingSource {
 public:
     StagingRegistry(duckdb::DuckDB& db, std::size_t max_staged_bytes);
 
@@ -109,14 +102,17 @@ public:
     std::vector<std::int32_t> partitions() const;
 
     // Seals every partition not in excluded that has something staged
-    Result<std::vector<SealedBuffer>> sealAll(const std::set<std::int32_t>& excluded = {});
+    Result<std::vector<SealedBuffer>> sealAll(const std::set<std::int32_t>& excluded = {}) override;
 
     // Drops a sealed table (after its commit, or when it is abandoned)
-    void dropSealed(const SealedBuffer& sealed);
+    void dropSealed(const SealedBuffer& sealed) override;
+
+    // Drops unsealed rows of these partitions (used on revoke)
+    void discard(const std::set<std::int32_t>& partitions) override;
 
     ByteBudget& budget() { return budget_; }
-    std::size_t unsealedBytes() const;
-    std::optional<std::chrono::steady_clock::time_point> oldestUnsealedRow() const;
+    std::size_t unsealedBytes() const override;
+    std::optional<std::chrono::steady_clock::time_point> oldestUnsealedRow() const override;
 
 private:
     duckdb::DuckDB& db_;

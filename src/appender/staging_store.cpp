@@ -301,6 +301,12 @@ void StagingRegistry::dropSealed(const SealedBuffer& sealed) {
     budget_.release(sealed.bytes);
 }
 
+void StagingRegistry::discard(const std::set<std::int32_t>& partitions) {
+    for (std::int32_t partition : partitions) {
+        if (auto staging = find(partition)) staging->discard();
+    }
+}
+
 std::size_t StagingRegistry::unsealedBytes() const {
     std::lock_guard lock(mutex_);
     std::size_t total = 0;

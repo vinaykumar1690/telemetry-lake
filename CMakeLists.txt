@@ -438,12 +438,14 @@ add_test(NAME AppenderCoreTest COMMAND appender_core_test)
 # Appender: DuckDB-backed staging, Iceberg sink and offset store
 if(DUCKDB_FOUND)
   add_library(appender_duckdb STATIC
+    src/appender/duckdb_iceberg.cpp
     src/appender/duckdb_session.cpp
     src/appender/staging_store.cpp
   )
   target_link_libraries(appender_duckdb PUBLIC appender_core duckdb)
 
   add_executable(appender_duckdb_test
+    tests/appender/test_sink.cpp
     tests/appender/test_staging.cpp
   )
   target_link_libraries(appender_duckdb_test PRIVATE appender_duckdb GTest::gtest GTest::gtest_main)
