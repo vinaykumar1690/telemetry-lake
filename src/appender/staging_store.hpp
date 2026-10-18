@@ -47,7 +47,7 @@ private:
 // Rows of one Kafka partition waiting for the next commit. Appends go into
 // the current generation table; seal() hands that table to the committer and
 // starts a new one, so appends never wait for an Iceberg commit.
-class PartitionStaging {
+class PartitionStaging : public PartitionWriter {
 public:
     PartitionStaging(duckdb::DuckDB& db, std::int32_t partition, ByteBudget& budget);
     ~PartitionStaging();
@@ -59,11 +59,12 @@ public:
 
     // Appends rows decoded from Kafka messages up to max_offset; bytes is the
     // payload size accounted against the budget. All-or-nothing.
-    Result<void> append(std::span<const LogRow> rows, std::int64_t max_offset, std::size_t bytes);
+    Result<void> append(std::span<const LogRow> rows, std::int64_t max_offset,
+                        std::size_t bytes) override;
 
     // Advances the offset without rows (e.g. a message with no log records,
     // or a poison message already sent to the DLQ)
-    void advanceOffset(std::int64_t offset);
+    void advanceOffset(std::int64_t offset) override;
 
     // nullopt when nothing new was staged since the last seal
     Result<std::optional<SealedBuffer>> seal();
@@ -92,13 +93,17 @@ private:
 };
 
 // The staging buffers of all partitions currently assigned to this process
-class StagingRegistry : public StagingSource {
+class StagingRegistry : public StagingSource, public StagingLookup {
 public:
     StagingRegistry(duckdb::DuckDB& db, std::size_t max_staged_bytes);
 
     Result<void> add(std::int32_t partition);
     void remove(std::int32_t partition);  // discards unsealed rows
     std::shared_ptr<PartitionStaging> find(std::int32_t partition) const;
+    std::shared_ptr<PartitionWriter> writer(std::int32_t partition) override { return find(partition); }
+    bool waitForCapacity(std::chrono::milliseconds timeout) override {
+        return budget_.waitBelowCap(timeout);
+    }
     std::vector<std::int32_t> partitions() const;
 
     // Seals every partition not in excluded that has something staged

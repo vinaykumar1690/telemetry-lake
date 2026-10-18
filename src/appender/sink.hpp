@@ -2,11 +2,13 @@
 #define APPENDER_SINK_HPP
 
 #include "error.hpp"
+#include "log_row.hpp"
 #include "sealed_buffer.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -27,6 +29,27 @@ public:
     virtual void discard(const std::set<std::int32_t>& partitions) = 0;
     virtual std::size_t unsealedBytes() const = 0;
     virtual std::optional<std::chrono::steady_clock::time_point> oldestUnsealedRow() const = 0;
+};
+
+// Where pipelines put decoded rows of one partition (PartitionStaging)
+class PartitionWriter {
+public:
+    virtual ~PartitionWriter() = default;
+    // Stages rows (possibly none) and moves the partition's offset to max_offset
+    virtual Result<void> append(std::span<const LogRow> rows, std::int64_t max_offset,
+                                std::size_t bytes) = 0;
+    // Moves the offset without rows (a poison message that reached the DLQ)
+    virtual void advanceOffset(std::int64_t offset) = 0;
+};
+
+// Pipelines' view of the staging area (StagingRegistry)
+class StagingLookup {
+public:
+    virtual ~StagingLookup() = default;
+    // nullptr when the partition is not (or no longer) assigned
+    virtual std::shared_ptr<PartitionWriter> writer(std::int32_t partition) = 0;
+    // Blocks while staged bytes are over the cap; false on timeout
+    virtual bool waitForCapacity(std::chrono::milliseconds timeout) = 0;
 };
 
 struct CommitContext {

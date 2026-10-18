@@ -421,6 +421,7 @@ add_library(appender_core STATIC
   src/appender/iceberg_committer.cpp
   src/appender/log_transformer.cpp
   src/appender/otlp_decoder.cpp
+  src/appender/pipeline_pool.cpp
 )
 target_include_directories(appender_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -434,6 +435,7 @@ add_executable(appender_core_test
   tests/appender/test_committer.cpp
   tests/appender/test_dlq.cpp
   tests/appender/test_foundations.cpp
+  tests/appender/test_pipeline.cpp
   tests/appender/test_transform.cpp
 )
 target_link_libraries(appender_core_test PRIVATE appender_core GTest::gtest GTest::gtest_main)
