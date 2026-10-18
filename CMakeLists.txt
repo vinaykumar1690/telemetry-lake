@@ -419,6 +419,7 @@ add_library(appender_core STATIC
   src/appender/appender_config.cpp
   src/appender/dlq_producer.cpp
   src/appender/flow_control.cpp
+  src/appender/health.cpp
   src/appender/iceberg_committer.cpp
   src/appender/log_transformer.cpp
   src/appender/otlp_decoder.cpp
@@ -437,6 +438,7 @@ add_executable(appender_core_test
   tests/appender/test_dlq.cpp
   tests/appender/test_flow.cpp
   tests/appender/test_foundations.cpp
+  tests/appender/test_health.cpp
   tests/appender/test_pipeline.cpp
   tests/appender/test_transform.cpp
 )
@@ -461,4 +463,13 @@ if(DUCKDB_FOUND)
   )
   target_link_libraries(appender_duckdb_test PRIVATE appender_duckdb GTest::gtest GTest::gtest_main)
   add_test(NAME AppenderDuckdbTest COMMAND appender_duckdb_test)
+endif()
+
+if(DUCKDB_FOUND)
+  add_executable(otel_appender
+    src/appender/main.cpp
+    src/appender/app.cpp
+    src/appender/health_server.cpp
+  )
+  target_link_libraries(otel_appender PRIVATE appender_duckdb Crow::Crow)
 endif()
