@@ -418,6 +418,7 @@ add_test(NAME HttpServerTest COMMAND http_server_test)
 add_library(appender_core STATIC
   src/appender/appender_config.cpp
   src/appender/dlq_producer.cpp
+  src/appender/flow_control.cpp
   src/appender/iceberg_committer.cpp
   src/appender/log_transformer.cpp
   src/appender/otlp_decoder.cpp
@@ -434,6 +435,7 @@ target_link_libraries(appender_core PUBLIC
 add_executable(appender_core_test
   tests/appender/test_committer.cpp
   tests/appender/test_dlq.cpp
+  tests/appender/test_flow.cpp
   tests/appender/test_foundations.cpp
   tests/appender/test_pipeline.cpp
   tests/appender/test_transform.cpp
@@ -447,9 +449,11 @@ if(DUCKDB_FOUND)
   add_library(appender_duckdb STATIC
     src/appender/duckdb_iceberg.cpp
     src/appender/duckdb_session.cpp
+    src/appender/kafka_source.cpp
     src/appender/staging_store.cpp
   )
-  target_link_libraries(appender_duckdb PUBLIC appender_core duckdb)
+  target_link_libraries(appender_duckdb PUBLIC appender_core duckdb cppkafka)
+  target_include_directories(appender_duckdb PUBLIC ${cppkafka_SOURCE_DIR}/include)
 
   add_executable(appender_duckdb_test
     tests/appender/test_sink.cpp
