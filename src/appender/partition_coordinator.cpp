@@ -165,7 +165,7 @@ size_t PartitionCoordinator::getTotalBufferRecordCount() const {
 void PartitionCoordinator::createWorker(int32_t partition) {
     std::lock_guard<std::mutex> lock(workers_mutex_);
 
-    if (workers_.find(partition) != workers_.end()) {
+    if (workers_.contains(partition)) {
         std::cout << "Partition " << partition << ": Worker already exists" << std::endl;
         return;
     }

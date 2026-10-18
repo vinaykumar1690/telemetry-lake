@@ -1,5 +1,5 @@
 # Multi-stage build for the appender (otel_appender)
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -54,13 +54,13 @@ RUN cmake -B build -G Ninja \
     && cmake --build build --target otel_appender -j$(nproc)
 
 # Runtime stage
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     librdkafka1 \
     zlib1g \
-    libssl3 \
+    libssl3t64 \
     curl \
     unzip \
     && rm -rf /var/lib/apt/lists/*

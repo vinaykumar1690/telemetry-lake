@@ -28,8 +28,8 @@ A high-performance C++ telemetry ingestion pipeline that receives OpenTelemetry 
 
 | Dependency | Version | Installation |
 |------------|---------|--------------|
-| C++ Compiler | C++17 compatible | Xcode Command Line Tools (macOS) or build-essential (Linux) |
-| CMake | 3.11+ | `brew install cmake` (macOS) or `apt install cmake` (Linux) |
+| C++ Compiler | C++23 compatible (GCC 13+, Clang 17+) | Xcode Command Line Tools (macOS) or build-essential on Ubuntu 24.04+ (Linux) |
+| CMake | 3.20+ | `brew install cmake` (macOS) or `apt install cmake` (Linux) |
 | Ninja | any | `brew install ninja` (macOS) or `apt install ninja-build` (Linux) |
 | librdkafka | any | `brew install librdkafka` (macOS) or `apt install librdkafka-dev` (Linux) |
 | Boost | 1.70+ | `brew install boost` (macOS) or `apt install libboost-all-dev` (Linux) |

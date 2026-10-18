@@ -1,5 +1,5 @@
 # Multi-stage build for the ingester (otel_receiver)
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -42,14 +42,14 @@ RUN cmake -B build -G Ninja \
     && cmake --build build --target otel_receiver -j$(nproc)
 
 # Runtime stage
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     librdkafka1 \
-    libboost-system1.74.0 \
+    libboost-system1.83.0 \
     zlib1g \
-    libssl3 \
+    libssl3t64 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
