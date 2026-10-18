@@ -57,7 +57,7 @@ void setRequired(ScopedEnv& env) {
                              "MAX_POLL_INTERVAL_MS", "ICEBERG_COMMIT_RETRIES",
                              "ICEBERG_TABLE_NAME", "ICEBERG_OFFSETS_TABLE", "ICEBERG_NAMESPACE",
                              "ICEBERG_RETRY_BASE_DELAY_MS", "ICEBERG_RETRY_MAX_DELAY_MS",
-                             "S3_URL_STYLE", "APPENDER_ID"}) {
+                             "S3_URL_STYLE", "APPENDER_ID", "ICEBERG_WAREHOUSE"}) {
         env.unset(name);
     }
 }
@@ -76,6 +76,7 @@ TEST(AppenderConfigTest, Defaults) {
     EXPECT_LE(config.pipeline_threads, 16u);
     EXPECT_FALSE(config.s3_use_ssl);
     EXPECT_FALSE(config.appender_id.empty());
+    EXPECT_EQ(config.warehouse, "bucket");  // defaults to S3_BUCKET
     EXPECT_EQ(config.qualifiedLogsTable(), R"(lake."default"."logs")");
     EXPECT_EQ(config.qualifiedOffsetsTable(), R"(lake."default"."_appender_offsets")");
 }
@@ -83,7 +84,7 @@ TEST(AppenderConfigTest, Defaults) {
 TEST(AppenderConfigTest, MissingRequiredVariableThrows) {
     ScopedEnv env;
     setRequired(env);
-    env.unset("S3_BUCKET");
+    env.unset("S3_SECRET_KEY");
     EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error);
 }
 

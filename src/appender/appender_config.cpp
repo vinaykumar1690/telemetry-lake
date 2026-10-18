@@ -89,7 +89,8 @@ AppenderConfig AppenderConfig::fromEnv() {
     config.s3_endpoint = requiredEnv("S3_ENDPOINT");
     config.s3_access_key = requiredEnv("S3_ACCESS_KEY");
     config.s3_secret_key = requiredEnv("S3_SECRET_KEY");
-    config.s3_bucket = requiredEnv("S3_BUCKET");
+    optionalEnv("S3_BUCKET", config.s3_bucket);
+    if (config.warehouse.empty()) config.warehouse = config.s3_bucket;
     optionalEnv("S3_REGION", config.s3_region);
     optionalEnv("S3_URL_STYLE", config.s3_url_style);
     if (config.s3_endpoint.starts_with("https://")) {
@@ -146,6 +147,7 @@ AppenderConfig AppenderConfig::fromEnv() {
         "OFFSETS_MAINTENANCE_INTERVAL_SECONDS",
         static_cast<int>(config.offsets_maintenance_interval.count()), 0, 86'400 * 7)};
 
+    optionalEnv("DUCKDB_HOME_DIRECTORY", config.duckdb_home_directory);
     config.health_port = integerFromEnv<std::uint16_t>("HEALTH_PORT", config.health_port, 1, 65535);
     config.appender_id = hostname();
     optionalEnv("APPENDER_ID", config.appender_id);

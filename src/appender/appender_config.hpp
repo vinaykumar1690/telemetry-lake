@@ -25,7 +25,7 @@ struct AppenderConfig {
 
     // Iceberg REST catalog
     std::string catalog_uri;
-    std::string warehouse;  // passed as the ATTACH target; empty for the catalog default
+    std::string warehouse;  // ATTACH target; defaults to s3_bucket
     std::string iceberg_namespace = "default";
     std::string table_name = "logs";
     std::string offsets_table_name = "_appender_offsets";
@@ -35,7 +35,7 @@ struct AppenderConfig {
     std::string s3_endpoint;  // host:port; an http:// or https:// prefix sets s3_use_ssl
     std::string s3_access_key;
     std::string s3_secret_key;
-    std::string s3_bucket;
+    std::string s3_bucket;  // optional; only used as the default warehouse
     std::string s3_region = "us-east-1";
     std::string s3_url_style = "path";
     bool s3_use_ssl = false;
@@ -54,6 +54,9 @@ struct AppenderConfig {
     std::chrono::milliseconds retry_max_delay{10'000};
     std::chrono::seconds revoke_timeout{60};
     std::chrono::seconds offsets_maintenance_interval{3600};
+
+    // DuckDB installs extensions under its home directory, which must be writable
+    std::string duckdb_home_directory = "/tmp";
 
     std::uint16_t health_port = 8080;
     std::string appender_id;  // recorded with each offsets row; defaults to the hostname
