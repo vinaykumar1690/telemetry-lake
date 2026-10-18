@@ -417,6 +417,7 @@ add_test(NAME HttpServerTest COMMAND http_server_test)
 # Appender: DuckDB-independent core, unit-tested on its own
 add_library(appender_core STATIC
   src/appender/appender_config.cpp
+  src/appender/iceberg_committer.cpp
   src/appender/log_transformer.cpp
   src/appender/otlp_decoder.cpp
 )
@@ -428,6 +429,7 @@ target_include_directories(appender_core PUBLIC
 target_link_libraries(appender_core PUBLIC otel_proto protobuf::libprotobuf nlohmann_json::nlohmann_json)
 
 add_executable(appender_core_test
+  tests/appender/test_committer.cpp
   tests/appender/test_foundations.cpp
   tests/appender/test_transform.cpp
 )
