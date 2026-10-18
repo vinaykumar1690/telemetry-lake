@@ -189,9 +189,10 @@ set(OTEL_PROTO_FILES
   "${OPENTELEMETRY_PROTO_ROOT}/opentelemetry/proto/collector/logs/v1/logs_service.proto"
 )
 
-# Custom proto files (telemetry wrapper)
+# Custom proto files (telemetry wrapper, vendored google.rpc.Status)
 set(CUSTOM_PROTO_FILES
   "${CUSTOM_PROTO_ROOT}/telemetry_wrapper.proto"
+  "${CUSTOM_PROTO_ROOT}/google/rpc/status.proto"
 )
 
 set(OTEL_PROTO_GENERATED_SRCS)
@@ -257,18 +258,29 @@ foreach(proto_file ${OTEL_PROTO_FILES})
   endif()
 endforeach()
 
-# Generate custom proto files (telemetry wrapper)
+# Generate custom proto files (telemetry wrapper, google.rpc.Status)
 set(CUSTOM_PROTO_GENERATED_SRCS)
 set(CUSTOM_PROTO_GENERATED_HDRS)
 
 foreach(proto_file ${CUSTOM_PROTO_FILES})
   get_filename_component(proto_name ${proto_file} NAME_WE)
+  get_filename_component(proto_path ${proto_file} PATH)
 
-  set(src_file ${CMAKE_CURRENT_BINARY_DIR}/${proto_name}.pb.cc)
-  set(hdr_file ${CMAKE_CURRENT_BINARY_DIR}/${proto_name}.pb.h)
+  # Calculate relative path from CUSTOM_PROTO_ROOT (protoc mirrors it in --cpp_out)
+  file(RELATIVE_PATH rel_path ${CUSTOM_PROTO_ROOT} ${proto_path})
+  if(rel_path)
+    set(out_dir ${CMAKE_CURRENT_BINARY_DIR}/${rel_path})
+  else()
+    set(out_dir ${CMAKE_CURRENT_BINARY_DIR})
+  endif()
+
+  set(src_file ${out_dir}/${proto_name}.pb.cc)
+  set(hdr_file ${out_dir}/${proto_name}.pb.h)
 
   list(APPEND CUSTOM_PROTO_GENERATED_SRCS ${src_file})
   list(APPEND CUSTOM_PROTO_GENERATED_HDRS ${hdr_file})
+
+  file(MAKE_DIRECTORY ${out_dir})
 
   # Generate protobuf files
   if(TARGET protobuf::protoc)
@@ -277,6 +289,7 @@ foreach(proto_file ${CUSTOM_PROTO_FILES})
       COMMAND $<TARGET_FILE:protobuf::protoc>
       ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
            --proto_path=${CUSTOM_PROTO_ROOT}
+           --proto_path=${protobuf_SOURCE_DIR}/src
            ${proto_file}
       DEPENDS ${proto_file} protobuf::protoc
       COMMENT "Generating ${proto_name}.pb.cc and ${proto_name}.pb.h"
@@ -287,6 +300,7 @@ foreach(proto_file ${CUSTOM_PROTO_FILES})
       COMMAND $<TARGET_FILE:protoc>
       ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
            --proto_path=${CUSTOM_PROTO_ROOT}
+           --proto_path=${protobuf_SOURCE_DIR}/src
            ${proto_file}
       DEPENDS ${proto_file} protoc
       COMMENT "Generating ${proto_name}.pb.cc and ${proto_name}.pb.h"
@@ -297,6 +311,7 @@ foreach(proto_file ${CUSTOM_PROTO_FILES})
       COMMAND ${PROTOC_EXECUTABLE}
       ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
            --proto_path=${CUSTOM_PROTO_ROOT}
+           --proto_path=${protobuf_SOURCE_DIR}/src
            ${proto_file}
       DEPENDS ${proto_file}
       COMMENT "Generating ${proto_name}.pb.cc and ${proto_name}.pb.h"
