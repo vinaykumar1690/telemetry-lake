@@ -122,14 +122,15 @@ async fn cursor_rules() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invalid_query");
 
-    // A snapshot the table no longer has: 410
-    let other = app_with(&[]);
+    // A snapshot the table no longer has (Nessie keeps only the current one):
+    // the search continues on the current snapshot
     let mut decoded = logquery::Cursor::decode(&cursor).unwrap();
     decoded.snapshot_id = Some(SNAPSHOT + 1);
     let stale = with(window(), json!({"limit": 2, "grep": "request", "cursor": decoded.encode()}));
-    let (status, body) = call(&other, "/v1/search", stale).await;
-    assert_eq!(status, StatusCode::GONE, "{body}");
-    assert_eq!(body["error"]["code"], "cursor_expired");
+    let (status, body) = call(&app, "/v1/search", stale).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["snapshot_id"], SNAPSHOT);
+    assert_eq!(body["rows"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]

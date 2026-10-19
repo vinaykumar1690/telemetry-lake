@@ -2,10 +2,14 @@
 //!
 //! A cursor names the last row a page returned by its sort key
 //! `(timestamp, topic, partition, offset, record_index)`, which is unique and
-//! survives compaction. It pins what the first page saw, so later pages
-//! neither skip nor repeat rows:
-//! - the Iceberg snapshot (new commits do not shift the pages)
+//! survives compaction, so later pages neither skip nor repeat rows. It also
+//! carries what the first page saw:
 //! - the resolved time range (`now-1h` means the same window on every page)
+//! - the Iceberg snapshot, read again while the catalog still has it. Nessie
+//!   keeps only the current snapshot, and other catalogs expire old ones; the
+//!   table is append-only, so the current snapshot is then used, and rows that
+//!   arrived since may appear on later pages
+
 //!
 //! A fingerprint of the filters, fields and order stops it from being
 //! replayed against a different query.

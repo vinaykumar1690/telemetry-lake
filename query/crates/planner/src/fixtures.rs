@@ -47,6 +47,12 @@ pub fn logs_schema() -> Schema {
 /// six rows across two partitions, services cycling checkout/cart/auth,
 /// every fifth body a timeout, a "user" attribute on every fourth row.
 pub fn logs_table() -> Arc<MemTable> {
+    logs_table_with_rows(ROWS)
+}
+
+/// Rows `0..rows` with the pattern above; a longer table is the same table
+/// after more appends
+pub fn logs_table_with_rows(rows: usize) -> Arc<MemTable> {
     let schema = Arc::new(logs_schema());
     let services = ["checkout", "cart", "auth"];
     let batch = |range: std::ops::Range<usize>| {
@@ -92,5 +98,7 @@ pub fn logs_table() -> Arc<MemTable> {
         RecordBatch::try_new(schema.clone(), columns).unwrap()
     };
     // Two partitions so the plan really merges
-    Arc::new(MemTable::try_new(schema.clone(), vec![vec![batch(0..13)], vec![batch(13..ROWS)]]).unwrap())
+    Arc::new(
+        MemTable::try_new(schema.clone(), vec![vec![batch(0..13.min(rows))], vec![batch(13.min(rows)..rows)]]).unwrap(),
+    )
 }

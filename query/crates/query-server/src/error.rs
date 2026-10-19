@@ -87,7 +87,6 @@ impl From<SourceError> for ApiError {
         let message = error.to_string();
         match error {
             SourceError::Unavailable(_) => Self::new(StatusCode::SERVICE_UNAVAILABLE, "catalog_unavailable", message),
-            SourceError::SnapshotExpired => Self::new(StatusCode::GONE, "cursor_expired", message),
             SourceError::Schema(_) => Self::new(StatusCode::SERVICE_UNAVAILABLE, "table_schema", message),
         }
     }

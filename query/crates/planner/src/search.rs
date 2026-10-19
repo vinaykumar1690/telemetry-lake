@@ -220,7 +220,7 @@ mod tests {
     use logquery::{CompareOp, Predicate, TextMatch, TimeRange, Value};
 
     use super::*;
-    pub use crate::fixtures::{BASE_US, ROWS, logs_schema, logs_table};
+    pub use crate::fixtures::{BASE_US, ROWS, logs_schema, logs_table, logs_table_with_rows};
 
     pub fn query(filter: Option<Predicate>) -> LogQuery {
         LogQuery {
@@ -234,8 +234,12 @@ mod tests {
     }
 
     async fn seqs(query: &LogQuery) -> (Vec<usize>, Option<Cursor>) {
+        seqs_in(logs_table(), query).await
+    }
+
+    async fn seqs_in(table: Arc<dyn TableProvider>, query: &LogQuery) -> (Vec<usize>, Option<Cursor>) {
         let planner = SearchPlanner::new(&logs_schema()).unwrap();
-        let out = planner.run(&SessionContext::new(), logs_table(), query, Some(7)).await.unwrap();
+        let out = planner.run(&SessionContext::new(), table, query, Some(7)).await.unwrap();
         let mut seqs = Vec::new();
         for batch in &out.batches {
             let column = batch.column_by_name("attr.seq").expect("requested field is projected");
@@ -296,6 +300,33 @@ mod tests {
                 }
             }
             assert_eq!(all, sorted((0..ROWS).collect(), order), "{order:?}");
+        }
+    }
+
+    /// Nessie keeps only the current snapshot, so a cursor's later pages may
+    /// read a table that has grown since its first page
+    #[tokio::test]
+    async fn pages_stay_exact_when_rows_are_appended_between_pages() {
+        for order in [Order::Desc, Order::Asc] {
+            let mut q = query(None);
+            q.order = order;
+            q.limit = 7;
+            let (mut all, mut rows_now) = (Vec::new(), ROWS);
+            loop {
+                let (rows, cursor) = seqs_in(logs_table_with_rows(rows_now), &q).await;
+                all.extend(rows);
+                rows_now += 5; // a commit lands before the next page
+                match cursor {
+                    Some(c) => q.cursor = Some(c),
+                    None => break,
+                }
+            }
+            let mut unique = all.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(unique.len(), all.len(), "{order:?}: a row was repeated");
+            assert!((0..ROWS).all(|i| all.contains(&i)), "{order:?}: a row of the first page's table was skipped");
+            assert_eq!(all, sorted(all.clone(), order), "{order:?}: order broke across pages");
         }
     }
 

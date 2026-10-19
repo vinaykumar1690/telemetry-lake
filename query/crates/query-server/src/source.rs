@@ -36,8 +36,6 @@ pub struct TableHandle {
 pub enum SourceError {
     #[error("logs table unavailable: {0}")]
     Unavailable(String),
-    #[error("the snapshot this cursor reads has expired; restart the search")]
-    SnapshotExpired,
     #[error("logs table schema: {0}")]
     Schema(String),
 }
@@ -173,7 +171,13 @@ impl TableSource for IcebergSource {
             return Ok(loaded.current.clone());
         }
         if loaded.table.metadata().snapshot_by_id(id).is_none() {
-            return Err(SourceError::SnapshotExpired);
+            // Nessie keeps only the current snapshot in table metadata, and
+            // other catalogs expire old ones. The logs table is append-only
+            // and compaction keeps row keys, so continuing on the current
+            // snapshot still neither repeats nor skips a row the cursor's
+            // first page could see.
+            tracing::debug!(snapshot = id, "cursor snapshot no longer in table metadata; using the current one");
+            return Ok(loaded.current.clone());
         }
         let provider = IcebergStaticTableProvider::try_new_from_table_snapshot(loaded.table.clone(), id)
             .await
@@ -204,10 +208,9 @@ pub struct StaticSource {
 #[async_trait]
 impl TableSource for StaticSource {
     async fn table(&self, snapshot_id: Option<i64>) -> Result<TableHandle, SourceError> {
-        match snapshot_id {
-            Some(id) if Some(id) != self.handle.snapshot_id => Err(SourceError::SnapshotExpired),
-            _ => Ok(self.handle.clone()),
-        }
+        // One snapshot only: any other falls back to it, as in IcebergSource
+        let _ = snapshot_id;
+        Ok(self.handle.clone())
     }
 
     fn is_ready(&self) -> bool {

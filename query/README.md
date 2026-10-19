@@ -120,12 +120,16 @@ condition and its negation always split the rows exactly.
 ### Pagination
 
 Rows are ordered by `(timestamp, _kafka_topic, _kafka_partition, _kafka_offset, _record_index)`,
-a unique and stable key, so pages never skip or repeat rows, even across
-timestamp ties. The cursor also pins the first page's Iceberg snapshot
-(commits landing meanwhile do not shift the pages) and its resolved time
-range (`now-1h` stays the same window). A cursor is bound to its query's
-filters, fields and order: other queries get 400. A cursor whose snapshot has
-been expired gets 410.
+a unique and stable key that compaction does not change, so pages never skip
+or repeat rows, even across timestamp ties. The cursor keeps the first page's
+resolved time range (`now-1h` stays the same window). It also names the first
+page's Iceberg snapshot, which later pages read while the catalog still has
+it. Nessie keeps only the current snapshot, and other catalogs expire old
+ones, so later pages usually read the current snapshot. The table is
+append-only, so that cannot skip or repeat a row; rows committed since the
+first page can appear on later pages when their timestamps fall after the
+cursor. A cursor is bound to its query's filters, fields and order: other
+queries get 400.
 
 ## `POST /v1/sql`
 
@@ -149,7 +153,6 @@ Errors are `{"error": {"code": ..., "message": ...}}`:
 | Status | Code | When |
 |--------|------|------|
 | 400 | `invalid_query`, `invalid_sql`, `invalid_request` | the request must change |
-| 410 | `cursor_expired` | the cursor's snapshot is gone; restart the search |
 | 429 | `overloaded` | no query slot within 2 s |
 | 503 | `catalog_unavailable`, `table_schema`, `resources_exhausted` | catalog down (with no cached table), the table lacks the row-key columns, or the memory pool is full |
 | 504 | `timeout` | over `QUERY_TIMEOUT_SECONDS` |
