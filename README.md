@@ -1,108 +1,217 @@
 # Telemetry Lake
 
-A high-performance C++ telemetry ingestion pipeline that receives OpenTelemetry (OTel) logs via HTTP and writes them to Apache Iceberg tables. The system uses Apache Kafka as a message queue for reliable, scalable log processing.
+A C++23 pipeline that receives OpenTelemetry (OTel) logs over OTLP/HTTP, buffers them in Apache Kafka, and writes them to Apache Iceberg tables that SQL engines (DuckDB, Trino, Spark) can query. Delivery from Kafka into Iceberg is **exactly-once**, across crashes, restarts and consumer-group rebalances.
+
+The full design, including the guarantees each hop gives and the reasons for them, is in [docs/design.md](docs/design.md).
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ OTel Agent  │────▶│  Ingester   │────▶│    Kafka    │────▶│   Appender  │
-│ (HTTP POST) │     │ (port 4318) │     │             │     │             │
-└─────────────┘     └─────────────┘     └─────────────┘     └──────┬──────┘
-                                                                   │
-                                                                   ▼
-                                                            ┌─────────────┐
-                                                            │   Iceberg   │
-                                                            │   (S3/MinIO)│
-                                                            └─────────────┘
+┌──────────────┐  OTLP/HTTP  ┌────────────────┐  raw payload   ┌──────────┐     ┌────────────────┐
+│ OTel SDKs /  │────────────▶│    Ingester    │───────────────▶│  Kafka   │────▶│    Appender    │
+│ Collectors   │  :4318      │ (otel_receiver)│  (no parsing)  │ otel-logs│     │ (otel_appender)│
+└──────────────┘             └────────────────┘                └──────────┘     └───┬────────┬───┘
+                                                                                    │        │ undecodable
+                                         one atomic commit: rows + Kafka offsets    │        ▼
+                                  ┌─────────────────────────────────────────────────┘   ┌──────────────┐
+                                  ▼                                                     │ otel-logs-dlq│
+                     ┌─────────────────────────┐      ┌──────────────────┐              └──────────────┘
+                     │ Iceberg REST catalog    │      │ S3 / MinIO       │
+                     │ (Nessie)                │      │ (Parquet files)  │
+                     └─────────────────────────┘      └──────────────────┘
 ```
 
-## Components
+- **Ingester** (`otel_receiver`, `src/ingester/`): a Crow HTTP server on port 4318. It validates `POST /v1/logs` requests (size, media type, gzip), sheds load with 503 when too many produces are in flight, and wraps the decompressed body, unparsed, in a `RawTelemetryMessage` ([proto/telemetry_wrapper.proto](proto/telemetry_wrapper.proto)) that it produces to Kafka with an idempotent, `acks=all` producer.
+- **Appender** (`otel_appender`, `src/appender/`): consumes the topic, decodes OTLP (protobuf or JSON), transforms each log record into a row, and stages rows per Kafka partition in in-memory DuckDB. On size, age or flush triggers it commits the staged rows to Iceberg.
 
-- **Ingester** (`otel_receiver`): HTTP server that accepts OTLP logs and produces to Kafka
-- **Appender** (`otel_appender`): Kafka consumer that transforms logs and writes to Iceberg
+### Guarantees in brief
 
-## Dependencies
+| Hop | Guarantee |
+|-----|-----------|
+| Client → Kafka | At-least-once for retried requests. A 200 means the message reached the producer's local queue, not that Kafka has it ([design §6.2](docs/design.md#62-client--kafka-ingester)) |
+| Kafka → Iceberg | **Exactly-once** per Kafka message |
+| Kafka → DLQ | At-least-once |
+| Within a Kafka partition | Order preserved |
 
-### System Dependencies (must be installed)
+How exactly-once works:
+- Each commit inserts the log rows **and** the Kafka offsets they cover into the `_appender_offsets` table in one DuckDB transaction, which DuckDB (≥ 1.5.4) sends to the catalog as a single REST `transactions/commit`.
+- On partition assignment the appender resumes from that table. Kafka consumer-group offsets are written afterwards, only as hints for lag monitoring.
+- When partitions are revoked, the appender waits for any in-flight commit covering them (or exits) before the new owner can start.
+- Nothing is skipped: undecodable messages go to a DLQ topic before their offset advances, and full pipelines pause partitions instead of dropping data.
 
-| Dependency | Version | Installation |
-|------------|---------|--------------|
-| C++ Compiler | C++23 compatible (GCC 13+, Clang 17+) | Xcode Command Line Tools (macOS) or build-essential on Ubuntu 24.04+ (Linux) |
-| CMake | 3.20+ | `brew install cmake` (macOS) or `apt install cmake` (Linux) |
-| Ninja | any | `brew install ninja` (macOS) or `apt install ninja-build` (Linux) |
-| librdkafka | any | `brew install librdkafka` (macOS) or `apt install librdkafka-dev` (Linux) |
-| Boost | 1.70+ | `brew install boost` (macOS) or `apt install libboost-all-dev` (Linux) |
-| zlib | any | Usually pre-installed; `brew install zlib` (macOS) or `apt install zlib1g-dev` (Linux) |
+Memory stays bounded: when Iceberg is unavailable the appender stops consuming at `MAX_STAGED_MB`, and Kafka holds the backlog. See [design §7](docs/design.md#7-backpressure-and-memory-bounds) and the [known limitations](docs/design.md#9-known-limitations-and-future-work).
 
-### Fetched Dependencies (automatically downloaded by CMake)
+### Tables
 
-These dependencies are fetched automatically during the CMake configuration step:
+| Table | Contents |
+|-------|----------|
+| `<namespace>.logs` | One row per log record, partitioned by `day(timestamp)`: Kafka coordinates, timestamps, severity, body, trace/span IDs, promoted resource fields (`service_name`, `host_name`, …), and `resource_attributes`/`log_attributes` maps |
+| `<namespace>._appender_offsets` | Append-only record of the Kafka offsets each commit made durable; the source of truth for recovery |
 
-| Dependency | Version | Purpose |
-|------------|---------|---------|
-| Crow | v1.3.0.0 | HTTP web framework |
-| Protocol Buffers | v25.3 | Serialization |
-| OpenTelemetry Proto | v1.3.1 | OTel message definitions |
-| Google Test | v1.14.0 | Unit testing |
-| DuckDB | v1.0.0 | Iceberg table writes |
-| cppkafka | v0.3.1 | C++ Kafka wrapper |
+The column definitions are in [src/appender/schema.hpp](src/appender/schema.hpp) and [design §8](docs/design.md#8-data-model). The appender creates both tables on startup, and refuses to start if an existing table has a different shape.
+
+## Prerequisites
+
+### To build
+
+| Dependency | Version | macOS (Homebrew) | Linux (Ubuntu 24.04+) |
+|------------|---------|------------------|------------------------|
+| C++ compiler | C++23 (GCC 13+, Clang 17+) | Xcode Command Line Tools | `build-essential` |
+| CMake | 3.20+ | `cmake` | `cmake` |
+| Ninja | any | `ninja` | `ninja-build` |
+| librdkafka | any recent (2.12 tested) | `librdkafka` | `librdkafka-dev` |
+| Crow | 1.3.0 | `crow` (pulls in `asio`) | [release tarball](https://github.com/CrowCpp/Crow/releases), plus `libasio-dev` |
+| GoogleTest | 1.14+ (1.17 tested) | `googletest` | `libgtest-dev libgmock-dev` |
+| DuckDB (library) | **1.5.4 or newer** (1.5.6 tested) | `duckdb` | `libduckdb-linux-amd64.zip` from [DuckDB releases](https://github.com/duckdb/duckdb/releases) |
+| zlib | any | usually present | `zlib1g-dev` |
+| OpenSSL | any | usually present | `libssl-dev` |
+
+CMake downloads the rest during configuration: Protocol Buffers v25.3, OpenTelemetry Proto v1.11.1, cppkafka v0.3.1 and nlohmann/json v3.12.0 (and zlib v1.3.1 if no system zlib is found).
+
+DuckDB is only needed for the appender. If CMake cannot find it, it prints a warning and skips `otel_appender` and `appender_duckdb_test`; if it finds a version older than 1.5.4, configuration fails. Point CMake at a non-standard install with `-DDUCKDB_ROOT=<dir>`.
+
+### To run the local stack
+
+| Tool | Version | macOS install | Used for |
+|------|---------|---------------|----------|
+| Docker Desktop | with `docker compose` v2 | <https://docs.docker.com/desktop/> | Kafka 4.3.1 and Nessie containers |
+| MinIO server | 2025-10-15 or newer | `brew install minio` | S3 store on `localhost:9000`, runs on the host |
+| DuckDB CLI | 1.5.4 or newer | `brew install duckdb` | Querying the tables, integration tests |
+| kcat | 1.7 | `brew install kcat` | End-to-end test only |
+| curl | 7.75 or newer (`--aws-sigv4`) | ships with macOS | Bucket creation, health checks |
+
+MinIO runs on the host rather than in Docker because MinIO no longer publishes public container images. Check that `duckdb --version` is 1.5.4 or newer: the DuckDB install script may have put an older CLI ahead of Homebrew's on your `PATH` (see [integration-testing.md](docs/integration-testing.md#prerequisites)).
 
 ## How to Build
 
-### 1. Install System Dependencies
+### 1. Install the dependencies
 
 **macOS (Homebrew):**
 ```bash
-brew install cmake ninja librdkafka boost zlib
+brew install cmake ninja librdkafka crow googletest duckdb
 ```
 
-**Linux (Ubuntu/Debian):**
+**Linux (Ubuntu 24.04+):**
 ```bash
 sudo apt update
-sudo apt install build-essential cmake ninja-build librdkafka-dev libboost-all-dev zlib1g-dev
+sudo apt install build-essential cmake ninja-build git pkg-config curl unzip \
+  librdkafka-dev libasio-dev libgtest-dev libgmock-dev zlib1g-dev libssl-dev
+
+# Crow (header-only)
+curl -L https://github.com/CrowCpp/Crow/releases/download/v1.3.0/Crow-1.3.0-Linux.tar.gz | tar -xz -C /tmp
+sudo cp -r /tmp/Crow-1.3.0-Linux/include/* /usr/local/include/
+sudo mkdir -p /usr/local/lib/cmake && sudo cp -r /tmp/Crow-1.3.0-Linux/lib/cmake/* /usr/local/lib/cmake/
+
+# DuckDB library
+curl -L -o /tmp/libduckdb.zip \
+  https://github.com/duckdb/duckdb/releases/download/v1.5.6/libduckdb-linux-amd64.zip
+unzip /tmp/libduckdb.zip -d /tmp/duckdb
+sudo cp /tmp/duckdb/duckdb.hpp /tmp/duckdb/duckdb.h /usr/local/include/
+sudo cp /tmp/duckdb/libduckdb.so /usr/local/lib/ && sudo ldconfig
 ```
 
-### 2. Clone and Build
+The same steps are in [docker/appender/Dockerfile](docker/appender/Dockerfile).
+
+### 2. Configure and build
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd telemetry-lake
+mkdir -p build && cd build
 
-# Create build directory
-mkdir -p build
-cd build
-
-# Configure with CMake (using Ninja generator)
 cmake .. -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+ninja                     # everything
 
-# Build all targets
-ninja
-
-# Or build specific targets
-ninja otel_receiver      # HTTP receiver only
-ninja otel_appender      # Kafka consumer/Iceberg writer only
-ninja http_server_test   # Tests only
+ninja otel_receiver       # ingester only
+ninja otel_appender       # appender only
 ```
-
-### Build Options
 
 | Option | Description |
 |--------|-------------|
-| `-GNinja` | Use Ninja build system (faster than Make) |
-| `-DCMAKE_BUILD_TYPE=Release` | Release build with optimizations |
-| `-DCMAKE_BUILD_TYPE=Debug` | Debug build with symbols |
 | `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` | Required for cppkafka compatibility |
+| `-DCMAKE_BUILD_TYPE=Release` / `Debug` | Optimized build / build with symbols |
+| `-DDUCKDB_ROOT=<dir>` | Where to look for the DuckDB library and headers |
 
-### Alternative: Using Make
+## Running the Stack Locally
 
-If you prefer Make over Ninja:
+The integration-test stack doubles as a local development environment: Kafka and Nessie (the Iceberg REST catalog) run in Docker, MinIO runs on the host. [docs/integration-testing.md](docs/integration-testing.md) describes it in detail, including the Nessie settings that matter and troubleshooting. To set the services up by hand instead, see [docs/mac-setup.md](docs/mac-setup.md).
+
+| Service | Where | Address | Notes |
+|---------|-------|---------|-------|
+| MinIO | host (Homebrew) | `localhost:9000` | credentials `minioadmin`/`minioadmin`; bucket `telemetrylakeit` |
+| Kafka 4.3.1 | Docker, single KRaft node | `localhost:9092` | auto topic creation is off; `stack.sh` creates the topics |
+| Nessie | Docker | `localhost:19120` | Iceberg REST at `http://localhost:19120/iceberg/`; warehouse `telemetrylakeit`; **in-memory**, so tables are forgotten when it restarts |
+
+### 1. Start the services
+
+From the repository root:
+
+```bash
+brew services start minio          # once; it stays running
+tests/it/stack.sh up               # bucket, Kafka, Nessie, topics e2e-logs (4 partitions) + e2e-logs-dlq
+eval "$(tests/it/stack.sh env)"    # exports KAFKA_BROKERS, KAFKA_TOPIC, ICEBERG_*, S3_*, DUCKDB
+```
+
+`stack.sh up` is idempotent. `tests/it/stack.sh topic NAME [PARTITIONS]` creates another topic; set `KAFKA_TOPIC` before `up` and `env` to use a different main topic (its `-dlq` topic is created too).
+
+### 2. Start the ingester and the appender
+
+In two terminals, each with the environment from step 1 loaded:
 
 ```bash
 cd build
-cmake ..
-make -j$(nproc)
+./otel_receiver
+# QueueProducer initialized with brokers: localhost:9092, topic: e2e-logs
+# OTel Log Receiver is running at http://0.0.0.0:4318
+```
+
+```bash
+cd build
+./otel_appender                    # writes to lake."default"."logs" by default
+
+curl localhost:8080/ready          # 200 once it is polling and committing
+```
+
+The appender commits every `BUFFER_TIME_SECONDS` (60 s by default) or when `BUFFER_SIZE_MB` is staged. To see data sooner, force a commit:
+
+```bash
+curl -X POST localhost:8080/flush  # or: kill -USR1 <appender pid>
+curl localhost:8080/metrics        # Prometheus metrics
+```
+
+`SIGINT`/`SIGTERM` (Ctrl-C) drains, makes a final commit and exits.
+
+### 3. Send logs and query them
+
+Send a request as shown in [How to Send Logs](#how-to-send-logs), flush, then query the table with the DuckDB CLI:
+
+```bash
+$DUCKDB -c "
+INSTALL iceberg; LOAD iceberg; INSTALL httpfs; LOAD httpfs;
+CREATE SECRET s3 (TYPE S3, KEY_ID 'minioadmin', SECRET 'minioadmin',
+                  ENDPOINT 'localhost:9000', REGION 'us-east-1', USE_SSL false, URL_STYLE 'path');
+ATTACH 'telemetrylakeit' AS lake (TYPE ICEBERG, ENDPOINT 'http://localhost:19120/iceberg/',
+                                  AUTHORIZATION_TYPE 'none', ACCESS_DELEGATION_MODE 'none');
+SELECT timestamp, service_name, severity_text, body FROM lake.\"default\".logs LIMIT 10;"
+```
+
+`ACCESS_DELEGATION_MODE 'none'` matters: Nessie does not vend S3 keys, so without it DuckDB reads and writes anonymously and MinIO answers 403 ([details](docs/integration-testing.md#access-delegation-duckdb--catalog)).
+
+### 4. Stop
+
+```bash
+tests/it/stack.sh down             # removes the containers; Nessie forgets all tables
+```
+
+Data files stay in the MinIO bucket; see [Cleaning up](docs/integration-testing.md#cleaning-up) to delete them. After a restart of Nessie, either clean the bucket or use a fresh `ICEBERG_NAMESPACE`.
+
+### Kubernetes
+
+The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
+
+```bash
+docker build -f docker/ingester/Dockerfile -t telemetry-lake/ingester:latest .
+docker build -f docker/appender/Dockerfile -t telemetry-lake/appender:latest .
 ```
 
 ## Configuration
@@ -183,42 +292,6 @@ The appender needs DuckDB 1.5.4 or newer. Delivery into Iceberg is exactly-once:
 
 Signals: `SIGINT`/`SIGTERM` drain, commit and exit; `SIGUSR1` forces a commit. Exit codes: 0 clean, 1 configuration/startup error, 2 fatal runtime error.
 
-## How to Run
-
-### Start the Ingester
-
-```bash
-# With required environment variables
-KAFKA_BROKERS=localhost:9092 ./otel_receiver
-
-# With custom topic
-KAFKA_BROKERS=kafka:9092 KAFKA_TOPIC=telemetry-logs ./otel_receiver
-```
-
-Output:
-```
-QueueProducer initialized with brokers: localhost:9092, topic: otel-logs
-OTel Log Receiver is running at http://0.0.0.0:4318
-```
-
-### Start the Appender
-
-```bash
-export KAFKA_BROKERS=localhost:9092
-export KAFKA_TOPIC=otel-logs
-export ICEBERG_CATALOG_URI=http://localhost:19120/iceberg/
-export ICEBERG_WAREHOUSE=telemetrylake
-export S3_ENDPOINT=http://localhost:9000
-export S3_ACCESS_KEY=minioadmin
-export S3_SECRET_KEY=minioadmin
-
-./otel_appender
-
-curl localhost:8080/ready            # 200 once polling and committing
-curl -X POST localhost:8080/flush    # commit everything staged now
-curl localhost:8080/metrics          # Prometheus metrics
-```
-
 ## How to Send Logs
 
 The receiver accepts OTLP logs on port 4318 at `/v1/logs`.
@@ -270,31 +343,33 @@ echo '{"resourceLogs":[...]}' | gzip | \
 
 ## Running Tests
 
+The unit tests need no services: they use fakes and in-memory DuckDB.
+
 ```bash
 cd build
-ninja
 ctest --output-on-failure
 
 ./http_server_test        # ingester
-./appender_core_test      # config, decoding, transformation, pipelines, committer, DLQ
+./appender_core_test      # appender logic, DuckDB-free
 ./appender_duckdb_test    # staging and the Iceberg commit SQL, against in-memory DuckDB
 ```
 
 | Test binary | Covers |
 |-------------|--------|
-| `http_server_test` | HTTP endpoint handling, content types, gzip, error cases |
+| `http_server_test` | HTTP endpoint handling, status codes, limits, content types, gzip, OTLP error bodies |
 | `appender_core_test` | Config validation, OTLP protobuf/JSON decoding, transformation, bounded queues, backoff, pipeline ordering/poison/backpressure, commit protocol (retries, indeterminate commits, fencing), DLQ headers |
-| `appender_duckdb_test` | Staging round-trips (quotes, backslashes, NUL, invalid UTF-8), atomic two-table commits, offset recovery |
+| `appender_duckdb_test` | Staging round-trips (quotes, backslashes, NUL, invalid UTF-8), generation sealing, atomic two-table commits, offset recovery |
 
-Tests against live Kafka, Nessie and MinIO are opt-in. Prerequisites, the
-local stack and expected results are in [docs/integration-testing.md](docs/integration-testing.md):
+Tests against live Kafka, Nessie and MinIO are opt-in. With the [local stack](#running-the-stack-locally) up and its environment loaded:
 
 ```bash
-tests/it/stack.sh up && eval "$(tests/it/stack.sh env)"   # from the repo root
-ICEBERG_IT=1 tests/it/iceberg_spike.sh
-(cd build && ICEBERG_IT=1 ./appender_duckdb_test --gtest_filter='IcebergIntegration*')
-E2E=1 tests/e2e/exactly_once.sh
+ICEBERG_IT=1 tests/it/iceberg_spike.sh                     # DuckDB + Nessie capabilities (~10 s)
+(cd build && ICEBERG_IT=1 DUCKDB_HOME_DIRECTORY=$HOME/.duckdb \
+    ./appender_duckdb_test --gtest_filter='IcebergIntegration*')   # commit + recovery (~5 s)
+E2E=1 tests/e2e/exactly_once.sh                            # exactly-once under kill -9, restarts, rebalance (3–6 min)
 ```
+
+The end-to-end test ends with `PASS: 10000 rows, no duplicates, no loss; N DLQ messages`. Expected output, the latest results and troubleshooting are in [docs/integration-testing.md](docs/integration-testing.md).
 
 ## Development
 
@@ -302,16 +377,13 @@ E2E=1 tests/e2e/exactly_once.sh
 
 ```
 telemetry-lake/
-├── CMakeLists.txt          # Build configuration
-├── proto/                  # Custom protobuf definitions
-│   └── telemetry_wrapper.proto
+├── CMakeLists.txt
+├── proto/telemetry_wrapper.proto   # Kafka message wrapper
 ├── src/
-│   ├── main.cpp            # Receiver entry point
-│   ├── config.hpp/cpp      # Configuration management
-│   ├── ingester/           # HTTP receiver components
-│   │   ├── http_server.hpp/cpp
-│   │   └── queue_producer.hpp/cpp
-│   └── appender/           # Kafka -> Iceberg appender (see docs/design.md)
+│   ├── main.cpp                    # Ingester entry point
+│   ├── config.hpp/cpp              # Ingester configuration
+│   ├── ingester/                   # HTTP server, Kafka producer
+│   └── appender/                   # Kafka -> Iceberg appender (see docs/design.md)
 │       ├── main.cpp, app.cpp           # wiring, signals, shutdown order
 │       ├── kafka_source.*              # consumer, rebalance, recovery, backpressure
 │       ├── pipeline_pool.*             # decode -> transform -> stage threads
@@ -320,39 +392,33 @@ telemetry-lake/
 │       ├── iceberg_committer.*         # commit cycles, retries, fencing
 │       ├── duckdb_iceberg.*            # atomic logs+offsets commit, offset store
 │       ├── duckdb_session.*, schema.hpp
-│       ├── dlq_producer.*, health*.*
-├── tests/                  # Unit tests
-└── docs/                   # Documentation
-    └── dev-prompts/        # Development session logs
+│       └── dlq_producer.*, health*.*
+├── tests/
+│   ├── test_http_server.cpp, appender/  # unit tests
+│   ├── it/                         # local stack (compose.yaml, stack.sh), Iceberg spike
+│   └── e2e/exactly_once.sh
+├── docker/                         # ingester and appender Dockerfiles
+├── helm/telemetry-lake/            # Helm chart
+└── docs/
+    ├── design.md                   # architecture and guarantees
+    ├── integration-testing.md      # local stack and live tests
+    └── mac-setup.md                # setting the services up by hand
 ```
 
-### Rebuilding After Changes
+### Troubleshooting
 
-```bash
-cd build
-ninja                    # Incremental build
-ninja clean && ninja     # Clean rebuild
-```
+| Symptom | Fix |
+|---------|-----|
+| CMake error from cppkafka about the policy version | Pass `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` |
+| `DuckDB library not found. otel_appender target will not be built.` | Install DuckDB (`brew install duckdb`) or pass `-DDUCKDB_ROOT=<dir>` |
+| `DuckDB x.y.z found ...; the appender needs >= 1.5.4` | `brew upgrade duckdb`, or point `DUCKDB_ROOT` at a newer library |
+| `librdkafka is required but not found` | `brew install librdkafka` / `apt install librdkafka-dev` |
+| `Could not find a package configuration file provided by "Crow"` | Install Crow (see [step 1](#1-install-the-dependencies)) |
+| Appender exits 2 at startup with a schema mismatch | The namespace holds tables from an older schema; use a fresh `ICEBERG_NAMESPACE` |
+| `403 Forbidden` writing `s3://...parquet` | Keep `ICEBERG_ACCESS_DELEGATION_MODE=none` unless the catalog vends credentials |
 
-### Troubleshooting Build Issues
-
-**CMake configuration fails with cppkafka error:**
-```bash
-cmake .. -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-```
-
-**Missing Boost:**
-```bash
-brew install boost  # macOS
-sudo apt install libboost-all-dev  # Linux
-```
-
-**Missing librdkafka:**
-```bash
-brew install librdkafka  # macOS
-sudo apt install librdkafka-dev  # Linux
-```
+More stack-related problems are covered in [integration-testing.md](docs/integration-testing.md#troubleshooting).
 
 ## License
 
-[Add license information here]
+Apache License 2.0; see [LICENSE](LICENSE).
