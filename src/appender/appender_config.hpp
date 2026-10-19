@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <string_view>
 
 namespace appender {
@@ -33,6 +34,9 @@ struct AppenderConfig {
     // "none": write with the S3 credentials below; "vended_credentials": use
     // the storage config the catalog returns per table
     std::string access_delegation_mode = "none";
+    // Attribute keys stored as their own VARCHAR columns (k8s.pod.name ->
+    // k8s_pod_name), so they get file statistics and bloom filters
+    std::vector<std::string> promoted_attributes;
 
     // S3-compatible storage
     std::string s3_endpoint;  // host:port; an http:// or https:// prefix sets s3_use_ssl

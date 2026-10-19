@@ -196,7 +196,7 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const Appender
     std::unique_ptr<DuckdbSession> session;
     try {
         session.reset(new DuckdbSession({config.qualifiedLogsTable(), config.qualifiedOffsetsTable()},
-                                        std::make_shared<schema::TableSchema>()));
+                                        std::make_shared<schema::TableSchema>(config.promoted_attributes)));
     } catch (const std::exception& e) {
         return fatal(std::format("cannot open DuckDB: {}", e.what()));
     }

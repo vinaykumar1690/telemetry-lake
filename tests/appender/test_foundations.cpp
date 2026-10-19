@@ -58,7 +58,7 @@ void setRequired(ScopedEnv& env) {
                              "ICEBERG_TABLE_NAME", "ICEBERG_OFFSETS_TABLE", "ICEBERG_NAMESPACE",
                              "ICEBERG_RETRY_BASE_DELAY_MS", "ICEBERG_RETRY_MAX_DELAY_MS",
                              "S3_URL_STYLE", "APPENDER_ID", "ICEBERG_WAREHOUSE",
-                             "ICEBERG_ACCESS_DELEGATION_MODE"}) {
+                             "ICEBERG_ACCESS_DELEGATION_MODE", "PROMOTED_ATTRIBUTES"}) {
         env.unset(name);
     }
 }
@@ -116,6 +116,25 @@ TEST(AppenderConfigTest, RejectsInvalidValues) {
     EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error);
     env.unset("ICEBERG_PARTITION_SPEC");
     env.set("ICEBERG_ACCESS_DELEGATION_MODE", "remote_signing");
+    EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error);
+}
+
+TEST(AppenderConfigTest, PromotedAttributes) {
+    ScopedEnv env;
+    setRequired(env);
+    EXPECT_TRUE(AppenderConfig::fromEnv().promoted_attributes.empty());
+
+    env.set("PROMOTED_ATTRIBUTES", " k8s.pod.name, http.status_code ,user-agent");
+    EXPECT_EQ(AppenderConfig::fromEnv().promoted_attributes,
+              (std::vector<std::string>{"k8s.pod.name", "http.status_code", "user-agent"}));
+
+    for (const char* bad : {"a,,b", "k8s pod", "a;b", "service.name", "a.b,a_b", "body"}) {
+        env.set("PROMOTED_ATTRIBUTES", bad);
+        EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error) << bad;
+    }
+    std::string many;
+    for (int i = 0; i < 33; ++i) many += std::format("{}k{}", i ? "," : "", i);
+    env.set("PROMOTED_ATTRIBUTES", many);
     EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error);
 }
 

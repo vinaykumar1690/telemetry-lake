@@ -128,19 +128,45 @@ TEST_F(SinkTest, PruneIsSkippedWithoutRewriteSupport) {
 }
 
 // Against a live REST catalog + S3, configured with the appender's env vars.
+TEST(PromotedSinkTest, CommitWritesPromotedColumnsAndNullsFormerOnes) {
+    auto promoted = std::make_shared<schema::TableSchema>(std::vector<std::string>{"k8s.pod.name"});
+    auto session = DuckdbSession::openLocal(kTables, promoted);
+    ASSERT_TRUE(session) << session.error().message;
+    auto conn = (*session)->connect();
+    ASSERT_TRUE(query(*conn, "ALTER TABLE logs ADD COLUMN formerly_promoted VARCHAR"));
+
+    StagingRegistry registry((*session)->database(), 1 << 20, promoted);
+    ASSERT_TRUE(registry.add(0));
+    LogRow row;
+    row.kafka_offset = 3;
+    row.promoted = {"pod-9"};
+    std::vector<LogRow> rows{row};
+    ASSERT_TRUE(registry.find(0)->append(rows, 3, 1));
+    auto sealed = registry.sealAll();
+    ASSERT_TRUE(sealed);
+
+    DuckdbIcebergSink sink(**session, kTables, kIdentity);
+    ASSERT_TRUE(sink.commit(*sealed, {std::chrono::system_clock::now()}));
+    auto result = query(*conn, "SELECT k8s_pod_name, formerly_promoted FROM logs");
+    ASSERT_TRUE(result);
+    EXPECT_EQ((*result)->GetValue(0, 0).ToString(), "pod-9");
+    EXPECT_TRUE((*result)->GetValue(1, 0).IsNull());
+}
+
 // Opt-in: ICEBERG_IT=1. Uses a fresh namespace per run.
 TEST(IcebergIntegrationTest, CommitAndRecoverAgainstLiveCatalog) {
     const char* enabled = std::getenv("ICEBERG_IT");
     if (!enabled || std::string_view(enabled) != "1") {
         GTEST_SKIP() << "set ICEBERG_IT=1 to run against a live catalog";
     }
+    ::setenv("PROMOTED_ATTRIBUTES", "k8s.pod.name", 1);
     ::setenv("ICEBERG_NAMESPACE",
              std::format("it_{}", std::chrono::system_clock::now().time_since_epoch().count()).c_str(), 1);
     const auto config = AppenderConfig::fromEnv();
     auto session = DuckdbSession::openIceberg(config);
     ASSERT_TRUE(session) << session.error().message;
 
-    StagingRegistry registry((*session)->database(), 1 << 20);
+    StagingRegistry registry((*session)->database(), 1 << 20, (*session)->schema());
     ASSERT_TRUE(registry.add(0));
     // 03:00Z and 22:00Z on one UTC day are on another local day in most
     // time zones, so a partition computed in local time is caught below
@@ -148,6 +174,7 @@ TEST(IcebergIntegrationTest, CommitAndRecoverAgainstLiveCatalog) {
     row.kafka_offset = 40;
     row.timestamp_us = 1'759'978'800'000'000LL;  // 2025-10-09T03:00:00Z
     row.attributes = {{"k", "v\\w"}};
+    row.promoted = {"pod-it"};
     LogRow late = row;
     late.kafka_offset = 41;
     late.timestamp_us = 1'760'047'200'000'000LL;  // 2025-10-09T22:00:00Z
@@ -175,4 +202,9 @@ TEST(IcebergIntegrationTest, CommitAndRecoverAgainstLiveCatalog) {
                                            (*session)->tables().logs));
     ASSERT_TRUE(pruned) << pruned.error().message;
     EXPECT_EQ((*pruned)->GetValue(0, 0).GetValue<int64_t>(), 2);
+
+    auto pods = query(*conn, std::format("SELECT count(*) FROM {} WHERE k8s_pod_name = 'pod-it'",
+                                         (*session)->tables().logs));
+    ASSERT_TRUE(pods) << pods.error().message;
+    EXPECT_EQ((*pods)->GetValue(0, 0).GetValue<int64_t>(), 2);
 }

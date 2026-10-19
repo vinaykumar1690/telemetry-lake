@@ -1,12 +1,16 @@
 #include "appender_config.hpp"
 
 #include "../config.hpp"
+#include "schema.hpp"
 #include "sql.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdlib>
 #include <format>
+#include <ranges>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -39,6 +43,40 @@ PartitionSpec partitionSpecFromEnv(PartitionSpec default_value) {
     if (value == "none") return PartitionSpec::None;
     throw std::runtime_error(
         std::format("ICEBERG_PARTITION_SPEC must be one of day, hour, none; got '{}'", value));
+}
+
+// PROMOTED_ATTRIBUTES: comma-separated attribute keys
+std::vector<std::string> promotedAttributesFromEnv() {
+    constexpr std::size_t kMaxPromoted = 32;
+    std::vector<std::string> keys;
+    const char* raw = std::getenv("PROMOTED_ATTRIBUTES");
+    if (!raw || !*raw) return keys;
+    std::set<std::string> columns;
+    for (auto part : std::string_view(raw) | std::views::split(',')) {
+        std::string_view text(part.begin(), part.end());
+        const auto first = text.find_first_not_of(" \t");
+        const auto last = text.find_last_not_of(" \t");
+        std::string key(first == std::string_view::npos ? "" : text.substr(first, last - first + 1));
+        auto fail = [&](std::string_view why) {
+            return std::runtime_error(std::format("PROMOTED_ATTRIBUTES: '{}' {}", key, why));
+        };
+        if (key.empty()) throw fail("is empty");
+        if (!std::ranges::all_of(key, [](unsigned char c) {
+                return std::isalnum(c) || c == '.' || c == '_' || c == '-';
+            })) {
+            throw fail("may only contain letters, digits, '.', '_' and '-'");
+        }
+        const auto column = schema::promotedColumnName(key);
+        if (std::ranges::any_of(schema::kLogsColumns, [&](const auto& c) { return c.name == column; })) {
+            throw fail(std::format("maps to the existing column {}", column));
+        }
+        if (!columns.insert(column).second) throw fail(std::format("maps to column {} twice", column));
+        keys.push_back(std::move(key));
+    }
+    if (keys.size() > kMaxPromoted) {
+        throw std::runtime_error(std::format("PROMOTED_ATTRIBUTES: at most {} keys", kMaxPromoted));
+    }
+    return keys;
 }
 
 std::string hostname() {
@@ -89,6 +127,7 @@ AppenderConfig AppenderConfig::fromEnv() {
             "ICEBERG_ACCESS_DELEGATION_MODE must be none or vended_credentials; got '{}'",
             config.access_delegation_mode));
     }
+    config.promoted_attributes = promotedAttributesFromEnv();
     if (config.table_name == config.offsets_table_name) {
         throw std::runtime_error("ICEBERG_TABLE_NAME and ICEBERG_OFFSETS_TABLE must differ");
     }

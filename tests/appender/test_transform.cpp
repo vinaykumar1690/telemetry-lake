@@ -106,6 +106,22 @@ TEST(LogTransformerTest, SharesResourceAndScopeAcrossRecords) {
     EXPECT_EQ(rows[0].scope.get(), rows[1].scope.get());
 }
 
+TEST(LogTransformerTest, PromotedAttributesPreferTheRecord) {
+    auto request = sampleRequest();
+    auto* record = request.mutable_resource_logs(0)->mutable_scope_logs(0)->mutable_log_records(0);
+    addAttr(record->mutable_attributes(), "cloud.region", "record-region");  // shadows the resource's
+    addAttr(record->mutable_attributes(), "user.id", "43");                  // repeated: last wins
+    const std::vector<std::string> keys{"cloud.region", "host.name", "user.id", "absent"};
+    std::vector<LogRow> rows;
+    transformLogs(request, {}, rows, keys);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].promoted, (std::vector<std::string>{"record-region", "node-7", "43", ""}));
+
+    std::vector<LogRow> plain;
+    transformLogs(request, {}, plain);
+    EXPECT_TRUE(plain[0].promoted.empty());
+}
+
 TEST(LogTransformerTest, NumbersRecordsWithinTheMessage) {
     auto request = sampleRequest();
     auto* resource_logs = request.add_resource_logs();

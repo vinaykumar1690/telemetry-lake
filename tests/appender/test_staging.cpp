@@ -93,6 +93,59 @@ TEST_F(StagingTest, EnsureTableRejectsDifferentSchema) {
     EXPECT_TRUE(ensureTable(*conn_, "offsets", schema::defs(schema::kOffsetsColumns)));
 }
 
+TEST(PromotedColumnsTest, StagedAndValidated) {
+    auto promoted = std::make_shared<schema::TableSchema>(std::vector<std::string>{"k8s.pod.name", "http.status_code"});
+    auto session = DuckdbSession::openLocal(kTables, promoted);
+    ASSERT_TRUE(session) << session.error().message;
+    auto conn = (*session)->connect();
+    auto value = [&](const std::string& sql) {
+        auto result = query(*conn, sql);
+        EXPECT_TRUE(result) << (result ? "" : result.error().message);
+        return (*result)->GetValue(0, 0);
+    };
+    // The logs table ends with the promoted columns
+    EXPECT_EQ(value("SELECT column_name FROM (DESCRIBE logs) OFFSET 25 LIMIT 1").ToString(), "k8s_pod_name");
+    EXPECT_EQ(value("SELECT column_name FROM (DESCRIBE logs) OFFSET 26 LIMIT 1").ToString(), "http_status_code");
+
+    StagingRegistry registry((*session)->database(), 1 << 20, promoted);
+    ASSERT_TRUE(registry.add(0));
+    LogRow row;
+    row.kafka_offset = 5;
+    row.promoted = {"pod-1", ""};  // empty: NULL
+    std::vector<LogRow> rows{row};
+    ASSERT_TRUE(registry.find(0)->append(rows, 5, 1));
+    auto sealed = registry.sealAll();
+    ASSERT_TRUE(sealed && sealed->size() == 1);
+    const auto table = std::format("\"{}\"", sealed->front().table);
+    EXPECT_EQ(value(std::format("SELECT k8s_pod_name FROM {}", table)).ToString(), "pod-1");
+    EXPECT_TRUE(value(std::format("SELECT http_status_code FROM {}", table)).IsNull());
+}
+
+TEST(PromotedColumnsTest, EnsureLogsTableAddsAndKeepsColumns) {
+    auto session = DuckdbSession::openLocal(kTables);  // base schema only
+    ASSERT_TRUE(session) << session.error().message;
+    auto conn = (*session)->connect();
+    auto columns = [&] {
+        auto result = query(*conn, "SELECT count(*) FROM (DESCRIBE logs)");
+        return (*result)->GetValue(0, 0).GetValue<int64_t>();
+    };
+    ASSERT_EQ(columns(), 25);
+
+    // Newly configured: added
+    const schema::TableSchema two(std::vector<std::string>{"a.b", "c"});
+    ASSERT_TRUE(ensureLogsTable(*conn, "logs", two));
+    EXPECT_EQ(columns(), 27);
+    // No longer configured: kept (written as NULL); reordered config is fine
+    ASSERT_TRUE(ensureLogsTable(*conn, "logs", schema::TableSchema(std::vector<std::string>{"c"})));
+    ASSERT_TRUE(ensureLogsTable(*conn, "logs", schema::TableSchema{}));
+    EXPECT_EQ(columns(), 27);
+    // Anything but VARCHAR after the base columns is someone else's table
+    ASSERT_TRUE(query(*conn, "ALTER TABLE logs ADD COLUMN n INTEGER"));
+    auto rejected = ensureLogsTable(*conn, "logs", schema::TableSchema{});
+    ASSERT_FALSE(rejected);
+    EXPECT_NE(rejected.error().message.find("must be VARCHAR"), std::string::npos);
+}
+
 TEST_F(StagingTest, AppendSealRoundTripsValues) {
     StagingRegistry registry(session_->database(), 1 << 20);
     ASSERT_TRUE(registry.add(2));
