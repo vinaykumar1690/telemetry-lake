@@ -74,6 +74,16 @@ TEST_F(StagingTest, OpenLocalCreatesTablesWithSchema) {
     EXPECT_EQ(scalar("SELECT count(*) FROM offsets").GetValue<int64_t>(), 0);
 }
 
+// Iceberg partition values of timestamptz must be computed in UTC, whatever
+// the machine's time zone
+TEST_F(StagingTest, SessionTimeZoneIsUtc) {
+    EXPECT_EQ(scalar("SELECT current_setting('TimeZone')").ToString(), "UTC");
+    auto other = session_->connect();  // every connection, not just the first
+    auto result = query(*other, "SELECT strftime(TIMESTAMPTZ '2026-10-19 05:40:00+00', '%Y-%m-%d %H')");
+    ASSERT_TRUE(result);
+    EXPECT_EQ((*result)->GetValue(0, 0).ToString(), "2026-10-19 05");
+}
+
 TEST_F(StagingTest, EnsureTableRejectsDifferentSchema) {
     ASSERT_TRUE(query(*conn_, "CREATE TABLE other (a INTEGER)"));
     auto result = ensureTable(*conn_, "other", schema::kOffsetsColumns);

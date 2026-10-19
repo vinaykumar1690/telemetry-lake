@@ -47,6 +47,7 @@ public:
 
 private:
     explicit DuckdbSession(TableNames tables);
+    Result<void> pinUtc();
 
     std::unique_ptr<duckdb::DuckDB> db_;
     TableNames tables_;

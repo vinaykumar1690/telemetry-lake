@@ -142,11 +142,16 @@ TEST(IcebergIntegrationTest, CommitAndRecoverAgainstLiveCatalog) {
 
     StagingRegistry registry((*session)->database(), 1 << 20);
     ASSERT_TRUE(registry.add(0));
+    // 03:00Z and 22:00Z on one UTC day are on another local day in most
+    // time zones, so a partition computed in local time is caught below
     LogRow row;
-    row.kafka_offset = 41;
-    row.timestamp_us = 1'760'000'000'000'000LL;
+    row.kafka_offset = 40;
+    row.timestamp_us = 1'759'978'800'000'000LL;  // 2025-10-09T03:00:00Z
     row.attributes = {{"k", "v\\w"}};
-    std::vector<LogRow> rows{row};
+    LogRow late = row;
+    late.kafka_offset = 41;
+    late.timestamp_us = 1'760'047'200'000'000LL;  // 2025-10-09T22:00:00Z
+    std::vector<LogRow> rows{row, late};
     ASSERT_TRUE(registry.find(0)->append(rows, 41, 1));
     auto sealed = registry.sealAll({});
     ASSERT_TRUE(sealed);
@@ -160,4 +165,14 @@ TEST(IcebergIntegrationTest, CommitAndRecoverAgainstLiveCatalog) {
     auto last = store.lastCommitted(partitions);
     ASSERT_TRUE(last) << last.error().message;
     EXPECT_EQ(last->at(0), 41);
+
+    // The row's UTC day partition must survive pruning: written with a local
+    // time zone's day, a reader filtering on the UTC day would skip the file
+    auto conn = (*session)->connect();
+    auto pruned = query(*conn, std::format("SELECT count(*) FROM {} WHERE \"timestamp\" >= TIMESTAMPTZ "
+                                           "'2025-10-09 00:00:00+00' AND \"timestamp\" < TIMESTAMPTZ "
+                                           "'2025-10-10 00:00:00+00'",
+                                           (*session)->tables().logs));
+    ASSERT_TRUE(pruned) << pruned.error().message;
+    EXPECT_EQ((*pruned)->GetValue(0, 0).GetValue<int64_t>(), 2);
 }

@@ -103,9 +103,23 @@ Result<void> ensureTable(duckdb::Connection& conn, const std::string& qualified_
 DuckdbSession::DuckdbSession(TableNames tables)
     : db_(std::make_unique<duckdb::DuckDB>(nullptr)), tables_(std::move(tables)) {}
 
+// Iceberg defines day()/hour() of a timestamptz in UTC, but DuckDB applies
+// its session time zone (by default the machine's) when it computes partition
+// values. Off UTC, rows land in the neighbouring day's partition and readers
+// prune them away. Without ICU DuckDB has no time zones and already uses UTC.
+Result<void> DuckdbSession::pinUtc() {
+    auto conn = connect();
+    auto result = conn->Query("SET GLOBAL TimeZone = 'UTC'");
+    if (result->HasError() && result->GetError().find("TimeZone") == std::string::npos) {
+        return fatal(std::format("cannot set the DuckDB time zone to UTC: {}", result->GetError()));
+    }
+    return {};
+}
+
 Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openLocal(const TableNames& tables) {
     try {
         std::unique_ptr<DuckdbSession> session(new DuckdbSession(tables));
+        if (auto r = session->pinUtc(); !r) return std::unexpected(r.error());
         auto conn = session->connect();
         if (auto r = ensureTable(*conn, tables.logs, schema::kLogsColumns); !r) {
             return std::unexpected(r.error());
@@ -126,6 +140,7 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const Appender
     } catch (const std::exception& e) {
         return fatal(std::format("cannot open DuckDB: {}", e.what()));
     }
+    if (auto r = session->pinUtc(); !r) return std::unexpected(r.error());
     auto conn = session->connect();
 
     // Extension installs need a writable home; container HOMEs often are not
