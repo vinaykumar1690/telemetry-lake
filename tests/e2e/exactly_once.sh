@@ -7,6 +7,9 @@
 # DUCKDB). Each run uses a fresh topic and Iceberg namespace, so runs never
 # see each other's data. See docs/integration-testing.md.
 #
+# COMPACT_DURING=1 also runs the compaction job (docker/compaction image)
+# back to back throughout, racing the appenders' commits and recoveries.
+#
 #   tests/it/stack.sh up && eval "$(tests/it/stack.sh env)"
 #   E2E=1 tests/e2e/exactly_once.sh
 set -euo pipefail
@@ -93,8 +96,33 @@ end_offsets() {  # "partition end_offset" per non-empty partition
     done | awk '$2 > 0'
 }
 
+# COMPACT_DURING=1: run the compaction job back to back for the whole test,
+# so rewrites and offsets pruning race the appenders' commits and recoveries
+compactor() {
+    local runs=0 failed=0
+    while [[ ! -e "$WORK/stop-compaction" ]]; do
+        if docker run --rm --add-host host.docker.internal:host-gateway \
+            -e ICEBERG_CATALOG_URI="${ICEBERG_CATALOG_URI/localhost/host.docker.internal}" \
+            -e S3_ENDPOINT="${S3_ENDPOINT/localhost/host.docker.internal}" \
+            -e S3_ACCESS_KEY -e S3_SECRET_KEY -e ICEBERG_WAREHOUSE -e ICEBERG_NAMESPACE \
+            -e COMPACTION_STEPS=compact,offsets,manifests -e COMPACTION_MIN_AGE_MINUTES=0 \
+            -e OFFSETS_MIN_AGE_MINUTES=0 "${COMPACTION_IMAGE:-telemetry-lake/compaction:dev}" \
+            >>"$WORK/compaction.log" 2>&1; then
+            runs=$((runs + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done
+    echo "$runs $failed" >"$WORK/compaction.runs"
+}
+
 echo "== starting appender a"
 start_appender A a 18080
+if [[ "${COMPACT_DURING:-0}" == "1" ]]; then
+    echo "== compacting continuously in the background"
+    compactor &
+    COMPACTOR=$!
+fi
 
 echo "== sending $BATCHES batches with crashes, a graceful restart and a rebalance"
 for ((b = 0; b < BATCHES; b++)); do
@@ -125,6 +153,14 @@ for ((t = 0; t < 120; t++)); do
     if [[ "$ROWS" -ge "$EXPECTED_ROWS" && "$(durable_offsets)" == "$(end_offsets)" ]]; then break; fi
     sleep 5
 done
+
+if [[ -n "${COMPACTOR:-}" ]]; then
+    touch "$WORK/stop-compaction"
+    wait "$COMPACTOR" || true
+    read -r RUNS FAILED <"$WORK/compaction.runs"
+    echo "   compaction runs: $RUNS completed, $FAILED failed (log: $WORK/compaction.log)"
+    grep -h "^compaction: logs: rewrote\|^compaction: offsets" "$WORK/compaction.log" | tail -4 | sed 's/^/   /'
+fi
 
 echo "== checking"
 RESULT=$(lake_sql "
