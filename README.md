@@ -51,10 +51,12 @@ Memory stays bounded: when Iceberg is unavailable the appender stops consuming a
 
 | Table | Contents |
 |-------|----------|
-| `<namespace>.logs` | One row per log record, partitioned by `day(timestamp)`: Kafka coordinates, timestamps, severity, body, trace/span IDs, promoted resource fields (`service_name`, `host_name`, …), and `resource_attributes`/`log_attributes` maps |
+| `<namespace>.logs` | One row per log record, partitioned by `day(timestamp)`: Kafka coordinates, timestamps, severity, body, trace/span IDs, promoted resource fields (`service_name`, `host_name`, …), `resource_attributes`/`log_attributes` maps, and a column per configured `PROMOTED_ATTRIBUTES` key |
 | `<namespace>._appender_offsets` | Append-only record of the Kafka offsets each commit made durable; the source of truth for recovery |
 
 The column definitions are in [src/appender/schema.hpp](src/appender/schema.hpp) and [design §8](docs/design.md#8-data-model). The appender creates both tables on startup, and refuses to start if an existing table has a different shape.
+
+The appender writes many small files. A **compaction job** ([compaction/compact.py](compaction/compact.py), Spark, run hourly by a CronJob) rewrites them into large files sorted by service, severity and time, with bloom filters, and prunes the offsets table. On Nessie, a daily **Nessie GC** job deletes the files it replaced ([design §8](docs/design.md#8-data-model)).
 
 ## Prerequisites
 
@@ -226,12 +228,13 @@ Data files stay in the MinIO bucket; see [Cleaning up](docs/integration-testing.
 
 ### Kubernetes
 
-The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, the query service (with a CPU autoscaler), Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
+The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, the query service (with a CPU autoscaler), the compaction and Nessie GC CronJobs, Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
 
 ```bash
 docker build -f docker/ingester/Dockerfile -t telemetry-lake/ingester:latest .
 docker build -f docker/appender/Dockerfile -t telemetry-lake/appender:latest .
 docker build -f docker/query/Dockerfile -t telemetry-lake/query:latest .
+docker build -f docker/compaction/Dockerfile -t telemetry-lake/compaction:latest .
 ```
 
 ## Configuration
@@ -288,6 +291,7 @@ Also cap the request body at your ingress (for example nginx `client_max_body_si
 | `ICEBERG_NAMESPACE` | `default` | Namespace of both tables |
 | `ICEBERG_TABLE_NAME` | `logs` | Logs table |
 | `ICEBERG_OFFSETS_TABLE` | `_appender_offsets` | Offsets table (source of truth for recovery) |
+| `PROMOTED_ATTRIBUTES` | (none) | Comma-separated attribute keys (at most 32) stored as their own VARCHAR columns, `.` → `_` (`k8s.pod.name` → `k8s_pod_name`); the record's value, else the resource's |
 | `ICEBERG_ACCESS_DELEGATION_MODE` | `none` | `none` writes with `S3_ACCESS_KEY`/`S3_SECRET_KEY`; `vended_credentials` uses the storage config the catalog returns |
 | `ICEBERG_PARTITION_SPEC` | `day` | `day`, `hour` or `none` partitioning of the logs table on `timestamp` |
 | `S3_ENDPOINT` | (required) | S3/MinIO endpoint; an `https://` prefix enables TLS |
@@ -390,6 +394,9 @@ ICEBERG_IT=1 tests/it/iceberg_spike.sh                     # DuckDB + Nessie cap
     ./appender_duckdb_test --gtest_filter='IcebergIntegration*')   # commit + recovery (~5 s)
 E2E=1 tests/e2e/exactly_once.sh                            # exactly-once under kill -9, restarts, rebalance (3–6 min)
 QUERY_IT=1 tests/it/query_it.py                           # query service vs DuckDB (~1 min; build query/ first)
+ICEBERG_IT=1 tests/it/compaction_spike.sh                  # Spark/Nessie maintenance capabilities (~2 min)
+COMPACTION_IT=1 tests/it/compaction_it.py                  # compaction vs appender and query service (~3 min)
+COMPACT_DURING=1 E2E=1 tests/e2e/exactly_once.sh           # exactly-once with compaction running throughout
 ```
 
 The end-to-end test ends with `PASS: 10000 rows, no duplicates, no loss; N DLQ messages`. Expected output, the latest results and troubleshooting are in [docs/integration-testing.md](docs/integration-testing.md).
@@ -420,9 +427,10 @@ telemetry-lake/
 │   └── crates/{logquery,planner,query-server}
 ├── tests/
 │   ├── test_http_server.cpp, appender/  # unit tests
-│   ├── it/                         # local stack (compose.yaml, stack.sh), Iceberg spike, query_it.py
+│   ├── it/                         # local stack, spikes, query_it.py, compaction_it.py
 │   └── e2e/exactly_once.sh
-├── docker/                         # ingester, appender and query Dockerfiles
+├── compaction/compact.py           # Iceberg maintenance job (Spark)
+├── docker/                         # ingester, appender, query and compaction Dockerfiles
 ├── helm/telemetry-lake/            # Helm chart
 └── docs/
     ├── design.md                   # architecture and guarantees

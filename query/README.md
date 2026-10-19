@@ -105,7 +105,7 @@ One namespace for every API (and later LogQL). A name resolves, first match wins
 
 1. a column of that exact name (`service_name`, `severity_number`, `_kafka_offset`)
 2. an alias: `time` → `timestamp`, `severity`/`level` → `severity_text`, `message`/`msg` → `body`, `deployment.environment.name` → `deployment_environment`
-3. the column named like the dotted key with `.` → `_` (`service.name` → `service_name`, `host.name` → `host_name`)
+3. the column named like the dotted key with `.` → `_` (`service.name` → `service_name`, `host.name` → `host_name`, and every appender `PROMOTED_ATTRIBUTES` key such as `k8s.pod.name` → `k8s_pod_name`, which then filters on the column and its statistics)
 4. an attribute: `log_attributes[name]`, else `resource_attributes[name]`
 
 `attr.<key>` forces the record's attributes; `resource.<key>` forces the

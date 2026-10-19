@@ -20,6 +20,15 @@ Today the table is written as **one small file per Kafka-partition-day per commi
 
 ## Status (2026-10-19)
 
+**Phase 1 (table layout) is implemented:**
+- The compaction job (`compaction/compact.py`, Spark 4.1.3 + Iceberg 1.11.0, Helm `compaction` CronJob) rewrites files older than an hour, sorted by `(service_name, severity_number, timestamp)`, with bloom filters.
+- It also prunes and compacts the offsets table and rewrites manifests.
+- A Nessie GC CronJob reclaims replaced files, because Nessie disables Iceberg's own GC.
+- `PROMOTED_ATTRIBUTES` columns in the appender, which the field resolver's `.`→`_` rule already maps.
+- The sort order is passed to each rewrite rather than set on the table, and the target file size is a rewrite option. DuckDB refuses to append to partitioned tables that set `write.target-file-size-bytes`.
+
+Results are in [integration-testing.md](integration-testing.md#compaction-2026-10-19). Building phase 1 also changed query-service cursors: Nessie keeps only the current snapshot, so a cursor whose snapshot is gone continues on the current one. That is exact for an append-only table whose row keys survive compaction.
+
 **Phase 2 (the single-node query MVP) is implemented** in `query/` ([query/README.md](../query/README.md) is the API reference). It is verified by:
 - 43 unit and HTTP tests
 - a live test, `tests/it/query_it.py`, which loads logs through the real ingester and appender and checks 11 search shapes, pagination and SQL against DuckDB

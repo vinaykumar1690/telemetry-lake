@@ -10,9 +10,11 @@ Iceberg REST catalog (Nessie) and S3 store (MinIO). The design they verify is in
 | `tests/it/iceberg_spike.sh` | DuckDB + Nessie support everything the appender relies on: partitioned `day()` writes of `TIMESTAMPTZ`/`MAP` columns, a two-table transaction sent as one REST `transactions/commit`, a failed transaction leaving both tables unchanged, backslash round-trips. It also lists the available Iceberg maintenance functions | MinIO, Nessie, `duckdb` CLI |
 | `appender_duckdb_test --gtest_filter='IcebergIntegration*'` | The appender's own code (`DuckdbSession::openIceberg`, staging, `DuckdbIcebergSink::commit`, `DuckdbOffsetStore::lastCommitted`) creates both tables, commits rows plus offsets, and recovers the offset | MinIO, Nessie |
 | `tests/e2e/exactly_once.sh` | Exactly-once from Kafka to Iceberg under `kill -9`, a graceful restart and a rebalance between two appenders, plus poison messages going to the DLQ | MinIO, Nessie, Kafka, built binaries, `kcat`, `duckdb` CLI |
+| `tests/it/compaction_spike.sh` | Spark (Iceberg Java) maintains DuckDB-written tables through Nessie: properties, sorted rewrites while DuckDB appends, bloom filters, DuckDB `ADD COLUMN`, Nessie GC | MinIO, Nessie, compaction image, `duckdb` CLI |
+| `tests/it/compaction_it.py` | Compaction against real appender output with promoted attributes: file count, unchanged rows (checksum), offsets pruning, bloom filters, sort order, pagination across a compaction, and every `query_it` search afterwards | as `query_it.py`, plus the compaction image |
 | `tests/it/query_it.py` | The query service against real appender output: 11 search shapes (time, column and map tags, numeric and absent attributes, grep, regex, combined) and cursor pagination (no duplicate or out-of-order rows), with each total checked against DuckDB over the same table; SQL count; the time filter reaching the Iceberg scan | MinIO, Nessie, Kafka, C++ binaries, `otel-query`, `duckdb` CLI, Python 3 |
 
-All are opt-in (`ICEBERG_IT=1` / `E2E=1` / `QUERY_IT=1`) and print `skipped` otherwise.
+All are opt-in (`ICEBERG_IT=1` / `E2E=1` / `QUERY_IT=1` / `COMPACTION_IT=1`) and print `skipped` otherwise. `COMPACT_DURING=1 E2E=1 tests/e2e/exactly_once.sh` additionally runs the compaction job back to back for the whole exactly-once test.
 
 ## Prerequisites
 
@@ -124,7 +126,17 @@ E2E=1 tests/e2e/exactly_once.sh
 # 4. Query service against real appender output (about 1 minute)
 (cd query && cargo build)
 QUERY_IT=1 tests/it/query_it.py
+
+# 5. Compaction (build the image once; about 2-3 minutes each)
+docker build -f docker/compaction/Dockerfile -t telemetry-lake/compaction:dev .
+ICEBERG_IT=1 tests/it/compaction_spike.sh
+COMPACTION_IT=1 tests/it/compaction_it.py
+COMPACT_DURING=1 E2E=1 tests/e2e/exactly_once.sh
 ```
+
+The compaction image is about 1.4 GB (Spark 4.1.3 plus Iceberg 1.11.0). It
+reaches Nessie and MinIO through `host.docker.internal`; the tests rewrite
+`localhost` in the environment for it.
 
 `DUCKDB_HOME_DIRECTORY` is where DuckDB caches the `iceberg`/`httpfs`
 extensions. Reusing `~/.duckdb` avoids a download per run.
@@ -261,6 +273,25 @@ client → Kafka is not exactly-once.
   from Nessie's metadata after the next appender commit. Cursors therefore
   fall back to the current snapshot (see query/README.md, Pagination).
 
+### Compaction (2026-10-19)
+
+- **`compaction_it.py`: pass.**
+  - 60 one-request commits made 60 data files, which compaction turned into 1.
+  - The original 3000 rows were unchanged (same count and checksum), and all
+    3250 row keys stayed distinct.
+  - The offsets table went from 60 rows to 4, with each partition's maximum
+    kept.
+  - The largest file has a bloom filter on `trace_id` and is sorted by
+    service. The two-value promoted `k8s_pod_name` is fully
+    dictionary-encoded, and Parquet skips bloom filters for such columns.
+  - A search paginated across the compaction returned all 3000 rows once.
+    `k8s_pod_name = …` reached the Iceberg scan, and all 11 `query_it`
+    searches matched DuckDB afterwards.
+- **`COMPACT_DURING=1` exactly-once: pass.** Five compaction runs (rewrites
+  and offsets pruning) raced two appenders through `kill -9`, a rebalance and
+  a graceful restart, and every run succeeded. The result was
+  `PASS: 10000 rows, no duplicates, no loss; 5 DLQ messages`.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -270,6 +301,8 @@ client → Kafka is not exactly-once.
 | Spike fails at `PARTITIONED BY` or `MAP` | An old `duckdb` CLI is first on `PATH`; use `$DUCKDB` |
 | `MinIO is not reachable` | `brew services start minio`; check `curl localhost:9000/minio/health/live` |
 | `bind: address already in use` on 9092/19120 | Another Kafka or Nessie is running; `docker ps`, or stop the other service |
+| DuckDB: `Table property target-file-size-bytes is currently not supported for partitioned tables` | Something set `write.target-file-size-bytes` on the logs table; unset it (`ALTER TABLE ... UNSET TBLPROPERTIES`). The compaction job passes the size as a rewrite option instead |
+| Compaction: `Cannot expire snapshots: GC is disabled` | Expected on Nessie; current `compact.py` skips the step (use Nessie GC) |
 | Time-range queries miss recent rows that `count(*)` finds | Data written by an appender built before the UTC fix on a non-UTC machine; rewrite it, or use a fresh namespace |
 | Ingester log: `Coordinator load in progress: retrying` | Harmless right after Kafka starts (idempotent producer initialization) |
 | Appender exits 2 on startup with a schema mismatch | The namespace holds tables from an older schema; use a fresh `ICEBERG_NAMESPACE` |

@@ -87,6 +87,8 @@ spec:
               value: {{ .Values.appender.kafka.dlqTopic | default (printf "%s-dlq" .Values.appender.kafka.topic) | quote }}
             - name: REVOKE_TIMEOUT_SECONDS
               value: {{ .Values.appender.revokeTimeoutSeconds | quote }}
+            - name: PROMOTED_ATTRIBUTES
+              value: {{ .Values.appender.promotedAttributes | quote }}
             - name: HEALTH_PORT
               value: {{ .Values.appender.healthPort | quote }}
             - name: APPENDER_ID

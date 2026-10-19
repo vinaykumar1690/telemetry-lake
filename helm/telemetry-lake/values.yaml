@@ -169,6 +169,9 @@ appender:
     threads: 2
     queueMB: 32        # per thread
   revokeTimeoutSeconds: 60
+  # Attribute keys stored as their own VARCHAR columns (k8s.pod.name -> k8s_pod_name),
+  # comma-separated; they get file statistics and bloom filters, map entries do not
+  promotedAttributes: ""
   terminationGracePeriodSeconds: 120
   healthPort: 8080
   resources:
@@ -209,3 +212,39 @@ query:
     limits:
       memory: "2Gi"
       cpu: "2000m"
+
+# Iceberg table maintenance (compaction/compact.py, Spark)
+compaction:
+  enabled: true
+  image:
+    repository: telemetry-lake/compaction
+    tag: latest
+    pullPolicy: IfNotPresent
+  schedule: "17 * * * *"     # hourly
+  steps: "properties,compact,offsets,expire,orphans,manifests"   # expire/orphans skip Nessie tables
+  minAgeMinutes: 60          # leave the newest files as the appender wrote them
+  targetFileSizeMB: 512
+  snapshotRetentionHours: 24 # catalogs with Iceberg GC enabled only
+  activeDeadlineSeconds: 3000
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "3Gi"
+      cpu: "4000m"
+
+# Nessie GC: deletes files no longer referenced (e.g. replaced by compaction)
+nessieGc:
+  enabled: true
+  image: ghcr.io/projectnessie/nessie-gc:latest
+  schedule: "43 3 * * *"     # daily
+  cutoff: "PT24H"            # history kept for Nessie time travel
+  maxFileAgeMinutes: 60      # never delete files younger than this (in-flight commits)
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"

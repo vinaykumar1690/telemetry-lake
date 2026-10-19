@@ -22,7 +22,7 @@ ctest --output-on-failure
 cd query && cargo build && cargo test --workspace
 ```
 
-Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`, `QUERY_IT=1`); the local stack (`tests/it/stack.sh up`) and prerequisites are in docs/integration-testing.md.
+Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`, `QUERY_IT=1`, `COMPACTION_IT=1`); the local stack (`tests/it/stack.sh up`) and prerequisites are in docs/integration-testing.md.
 
 The `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` flag is required for cppkafka compatibility.
 
@@ -40,6 +40,8 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 - Revoked partitions are fenced: the revoke callback waits for any in-flight commit covering them (or exits) before returning
 - Nothing is skipped: undecodable messages go to a Kafka DLQ topic before their offset advances; full pipelines pause partitions
 - Appender DuckDB sessions run in UTC: Iceberg partition transforms of timestamptz are UTC, DuckDB otherwise uses the machine's zone
+- Compaction/maintenance is a separate Spark job (`compaction/compact.py`, docker/compaction, Helm CronJob); on Nessie (gc.enabled=false) files are reclaimed by the nessie-gc CronJob. Never set `write.target-file-size-bytes` on the logs table: DuckDB refuses to append to partitioned tables that set it
+- `PROMOTED_ATTRIBUTES` adds VARCHAR columns after the base ones (`schema::TableSchema`); the query service resolves `k8s.pod.name` to `k8s_pod_name` by its `.`→`_` rule, so names must stay in sync
 - `_record_index` (position within the Kafka message) + topic/partition/offset is the unique row key; the query service's cursors depend on it
 - DuckDB (≥ 1.5.4) stages rows per partition (`duckdb::Appender`) and writes Iceberg; include it only via `src/appender/duckdb_include.hpp` (works around a C++23 incompatibility in DuckDB's headers)
 

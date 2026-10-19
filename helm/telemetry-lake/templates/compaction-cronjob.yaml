@@ -1,0 +1,129 @@
+{{- if .Values.compaction.enabled }}
+# Iceberg table maintenance (compaction/compact.py): sorted compaction with
+# bloom filters, offsets-table pruning, manifest rewrites. Safe while the
+# appender commits; one run at a time.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compaction
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: compaction
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.compaction.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ .Values.compaction.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            app: compaction
+            {{- include "telemetry-lake.labels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: compaction
+              image: "{{ .Values.compaction.image.repository }}:{{ .Values.compaction.image.tag }}"
+              imagePullPolicy: {{ .Values.compaction.image.pullPolicy }}
+              env:
+                # Same catalog, tables and storage as the appender
+                - name: ICEBERG_CATALOG_URI
+                  value: {{ .Values.appender.iceberg.catalogUri | default (include "telemetry-lake.nessieEndpoint" .) | quote }}
+                - name: ICEBERG_WAREHOUSE
+                  value: {{ .Values.appender.iceberg.warehouse | default .Values.nessie.warehouse | quote }}
+                - name: ICEBERG_TABLE_NAME
+                  value: {{ .Values.appender.iceberg.tableName | quote }}
+                - name: S3_ENDPOINT
+                  value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
+                - name: S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.appender.s3.accessKeySecret.name | default "s3-credentials" }}
+                      key: {{ .Values.appender.s3.accessKeySecret.key }}
+                - name: S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.appender.s3.secretKeySecret.name | default "s3-credentials" }}
+                      key: {{ .Values.appender.s3.secretKeySecret.key }}
+                # Bloom filters on the promoted columns too
+                - name: PROMOTED_ATTRIBUTES
+                  value: {{ .Values.appender.promotedAttributes | quote }}
+                - name: COMPACTION_STEPS
+                  value: {{ .Values.compaction.steps | quote }}
+                - name: COMPACTION_MIN_AGE_MINUTES
+                  value: {{ .Values.compaction.minAgeMinutes | quote }}
+                - name: TARGET_FILE_SIZE_MB
+                  value: {{ .Values.compaction.targetFileSizeMB | quote }}
+                - name: SNAPSHOT_RETENTION_HOURS
+                  value: {{ .Values.compaction.snapshotRetentionHours | quote }}
+              resources:
+                {{- toYaml .Values.compaction.resources | nindent 16 }}
+{{- end }}
+{{- if .Values.nessieGc.enabled }}
+---
+# Nessie keeps table history in its commit log and disables Iceberg's own
+# snapshot expiry, so files replaced by compaction are reclaimed by Nessie GC.
+# Files newer than maxFileAgeMinutes are never deleted: the appender writes
+# data files before it commits them.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nessie-gc
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: nessie-gc
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.nessieGc.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: nessie-gc
+            {{- include "telemetry-lake.labels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: nessie-gc
+              image: {{ .Values.nessieGc.image | quote }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - >-
+                  exec java -jar /nessie-gc.jar gc --inmemory
+                  -u "$NESSIE_API" -c "$CUTOFF"
+                  --max-file-modification "$(date -u -d "@$(( $(date +%s) - MAX_FILE_AGE_MINUTES * 60 ))" +%Y-%m-%dT%H:%M:%SZ)"
+                  -I s3.endpoint="$S3_ENDPOINT" -I s3.path-style-access=true -I client.region=us-east-1
+                  -I s3.access-key-id="$S3_ACCESS_KEY" -I s3.secret-access-key="$S3_SECRET_KEY"
+              env:
+                - name: NESSIE_API
+                  value: "http://nessie:19120/api/v2"
+                # Content of commits older than this (except each branch's head) is collectable
+                - name: CUTOFF
+                  value: {{ .Values.nessieGc.cutoff | quote }}
+                - name: MAX_FILE_AGE_MINUTES
+                  value: {{ .Values.nessieGc.maxFileAgeMinutes | quote }}
+                - name: S3_ENDPOINT
+                  value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
+                - name: S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.appender.s3.accessKeySecret.name | default "s3-credentials" }}
+                      key: {{ .Values.appender.s3.accessKeySecret.key }}
+                - name: S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.appender.s3.secretKeySecret.name | default "s3-credentials" }}
+                      key: {{ .Values.appender.s3.secretKeySecret.key }}
+              resources:
+                {{- toYaml .Values.nessieGc.resources | nindent 16 }}
+{{- end }}

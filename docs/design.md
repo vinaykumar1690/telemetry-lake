@@ -26,7 +26,7 @@ flowchart LR
 **Non-goals (today)**
 - Metrics and traces (the wrapper has a `telemetry_type` field so they can be added).
 - Exactly-once from the *client* to Kafka; see [6.2](#62-client--kafka-ingester).
-- Iceberg table maintenance (compaction, snapshot expiry) of the logs table. That is left to external jobs.
+- Iceberg table maintenance (compaction, file GC) inside the appender. A separate batch job does it ([§8](#8-data-model), `compaction/compact.py`).
 
 ## 2. Components at a glance
 
@@ -336,8 +336,20 @@ When Iceberg is down, the appender stops consuming once `MAX_STAGED_MB` is reach
 | `service_name`, `service_namespace`, `service_instance_id`, `deployment_environment`, `host_name` | VARCHAR | promoted resource attributes (`deployment.environment.name`, falling back to `deployment.environment`) |
 | `scope_name`, `scope_version` | VARCHAR | InstrumentationScope |
 | `resource_attributes`, `log_attributes` | MAP(VARCHAR, VARCHAR) | all attributes; values stringified |
+| one per `PROMOTED_ATTRIBUTES` key, e.g. `k8s_pod_name` | VARCHAR, after all base columns | the record's attribute, else the resource's; the key stays in the map too. Columns get Parquet statistics and bloom filters, map entries do not. Newly configured keys are added with `ALTER TABLE ADD COLUMN`; removed ones keep their column, written as NULL ([`ensureLogsTable`](../src/appender/duckdb_session.cpp)) |
 
-**`_appender_offsets`** (append-only): `consumer_group, topic, partition, last_offset, committed_at, appender_id`. Recovery filters by `topic` only: data in the logs table is durable regardless of which group or replica wrote it. [`prune`](../src/appender/duckdb_iceberg.cpp#L105) deletes superseded rows hourly, but only when the DuckDB build can compact the table (`iceberg_rewrite_data_files`); deletes without compaction would make reads slower. Otherwise compact it externally.
+**`_appender_offsets`** (append-only): `consumer_group, topic, partition, last_offset, committed_at, appender_id`. Recovery filters by `topic` only: data in the logs table is durable regardless of which group or replica wrote it. The compaction job deletes superseded rows (never a partition's maximum) and bin-packs the table. The appender's own [`prune`](../src/appender/duckdb_iceberg.cpp#L105) stays a no-op until DuckDB can compact Iceberg tables.
+
+**Maintenance** ([`compaction/compact.py`](../compaction/compact.py), the Helm `compaction` CronJob, hourly, run with Spark):
+- **Rewrite.** It rewrites `logs` files older than an hour into files of about 512 MB, sorted by `(service_name, severity_number, timestamp)`.
+- **Bloom filters** on `trace_id`, `span_id`, `host_name`, `service_instance_id` and the promoted columns.
+- **Offsets table:** prunes and compacts it.
+- **Manifests:** rewrites them.
+- **Snapshot expiry and orphan removal,** only where the catalog leaves Iceberg GC enabled.
+
+It is safe alongside the appender. A rewrite is a validated replace commit and the appender only appends. Rows and their Kafka offsets are copied unchanged, so exactly-once delivery holds. The e2e test passes with compaction running throughout.
+
+Nessie keeps table history in its own commit log and sets `gc.enabled=false`. The files compaction replaces are therefore reclaimed by Nessie GC (the `nessie-gc` CronJob, daily). It never deletes files younger than an hour, because the appender writes data files before it commits them.
 
 ## 9. Known limitations and future work
 
@@ -353,7 +365,7 @@ When Iceberg is down, the appender stops consuming once `MAX_STAGED_MB` is reach
 
    If a catalog rejects multi-table commits, the fallback is recovery from `_ingested_at`-bounded scans of the logs table.
 3. **Zombie window** after a client-side commit timeout ([6.4](#64-rebalances-and-fencing)).
-4. **Table maintenance** of `logs` (compaction of the roughly one file per partition-day per commit, snapshot expiry) is external.
+4. **Table maintenance** runs as separate CronJobs (compaction with Spark, Nessie GC). Until a run compacts them, the newest hour of data stays in the appender's small files.
 5. **Schema evolution** is not automated. A schema mismatch stops startup.
 6. **Eager rebalancing** pauses every partition during a rebalance. Cooperative-sticky would need incremental assignment support and a per-partition fence, which the design already has.
 7. **DuckDB header workaround**: DuckDB 1.5.x headers fail under C++23. [`duckdb_include.hpp`](../src/appender/duckdb_include.hpp) works around this and should be removed once DuckDB fixes it upstream.
