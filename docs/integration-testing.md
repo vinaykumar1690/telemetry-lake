@@ -84,8 +84,11 @@ You only need these if you build your own stack, for example with the Nessie
   (`s3.remote-signing-enabled: true`), which DuckDB does not implement. The
   stack sets `request-signing-enabled: false`. Because the appender also
   disables access delegation (below), only other clients depend on this.
-- **External endpoint.** Nessie talks to MinIO at `http://host.docker.internal:9000`.
-  `external-endpoint: http://localhost:9000` is the address handed to clients.
+- **External endpoint.** Nessie talks to MinIO at `http://host.docker.internal:9000`,
+  and `external-endpoint` hands clients the same address. Iceberg's Java client
+  (the Spark compaction job, in a container) uses the catalog's endpoint over its
+  own, so it must be reachable from containers. DuckDB (access delegation off)
+  and `otel-query` (its own `S3_ENDPOINT` wins) ignore it.
 - **In-memory store.** `stack.sh down` (or any Nessie restart) forgets every
   table. The Parquet and metadata files stay in the bucket. Tests always create
   fresh namespaces, so leftovers are harmless; see [Cleaning up](#cleaning-up).
@@ -225,6 +228,38 @@ client → Kafka is not exactly-once.
   the wrong count, 600 of 3000. Appender sessions now run in UTC, and the
   `ICEBERG_IT` gtest writes rows at 03:00Z and 22:00Z to catch a regression
   (it fails without the fix).
+
+### Compaction spike (2026-10-19, Spark 4.1.3, Iceberg 1.11.0)
+
+`ICEBERG_IT=1 tests/it/compaction_spike.sh`, after building the image with
+`docker build -f docker/compaction/Dockerfile -t telemetry-lake/compaction:dev .`:
+
+- **Spark reads DuckDB-written tables.** Iceberg Java through the Nessie REST
+  catalog, S3FileIO to MinIO.
+- **Bloom-filter table properties do not block DuckDB appends, but
+  `write.target-file-size-bytes` does.** DuckDB refuses to append to a
+  partitioned table that sets it. The job therefore passes the target size as
+  a `rewrite_data_files` option and sets no file-size property.
+- **DuckDB supports `ALTER TABLE ... ADD COLUMN`** on Iceberg tables, so the
+  appender adds promoted-attribute columns itself.
+- **Compaction while DuckDB appends.** `rewrite_data_files` (sort) turned 11
+  files into 1 and the manifests 12 into 1. All rows survived, and offsets
+  pruning kept the maximum offset (6 rows down to 1).
+- **The rewritten files have bloom filters** (`trace_id` has a
+  `bloom_filter_offset`), and their rows are sorted by `service_name`.
+- **Nessie keeps only the current snapshot in table metadata** (history lives
+  in Nessie's commit log) and sets `gc.enabled=false`. Iceberg's
+  `expire_snapshots` fails with "GC is disabled", so the job skips the expire
+  and orphan steps on such tables.
+  - **Nessie GC** (`ghcr.io/projectnessie/nessie-gc`) reclaims the files
+    compaction replaced: the namespace went from 12 Parquet files to 1, and
+    the table stayed readable and appendable.
+  - Nessie GC must run with `--max-file-modification` well in the past. The
+    appender writes data files before it commits them, and GC would otherwise
+    delete files an in-flight commit is about to reference.
+- **Consequence for the query service.** A cursor's pinned snapshot is gone
+  from Nessie's metadata after the next appender commit. Cursors therefore
+  fall back to the current snapshot (see query/README.md, Pagination).
 
 ## Troubleshooting
 

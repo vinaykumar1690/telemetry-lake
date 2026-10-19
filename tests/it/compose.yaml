@@ -35,9 +35,11 @@ services:
       nessie.catalog.default-warehouse: telemetrylakeit
       NESSIE_CATALOG_WAREHOUSES_TELEMETRYLAKEIT_LOCATION: s3://telemetrylakeit
       nessie.catalog.service.s3.default-options.region: us-east-1
-      # Nessie reaches MinIO through Docker's host gateway; clients use the external endpoint
+      # Nessie reaches MinIO through Docker's host gateway. The external endpoint is
+      # what clients are told; Java clients (Spark compaction) use it as is, so it
+      # must work from containers. Host-side clients (DuckDB, otel-query) set their own.
       nessie.catalog.service.s3.default-options.endpoint: http://host.docker.internal:9000
-      nessie.catalog.service.s3.default-options.external-endpoint: http://localhost:9000
+      nessie.catalog.service.s3.default-options.external-endpoint: http://host.docker.internal:9000
       nessie.catalog.service.s3.default-options.path-style-access: "true"
       nessie.catalog.service.s3.default-options.auth-type: STATIC
       # DuckDB cannot use S3 remote signing; clients sign with their own S3 secret
