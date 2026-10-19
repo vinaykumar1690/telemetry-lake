@@ -1,0 +1,20 @@
+[package]
+name = "planner"
+description = "Resolves log query fields and lowers LogQuery to DataFusion plans"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+logquery.workspace = true
+datafusion.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+
+[features]
+# Exposes fixtures::logs_table() to other crates' tests
+test-fixtures = []
+
+[dev-dependencies]
+tokio.workspace = true
