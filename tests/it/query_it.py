@@ -80,13 +80,18 @@ ATTACH '{env("ICEBERG_WAREHOUSE", "")}' AS lake (TYPE ICEBERG, ENDPOINT '{env("I
 .output
 """
 
-    def scalar(self, where="TRUE"):
-        sql = f'SELECT count(*) FROM lake."{self.namespace}".logs WHERE {where};'
+    def rows(self, sql):
+        """Rows of a query (CSV fields as strings); {logs} and {offsets} name the tables"""
+        sql = sql.format(logs=f'lake."{self.namespace}".logs', offsets=f'lake."{self.namespace}"._appender_offsets')
         out = subprocess.run([os.environ.get("DUCKDB", "duckdb"), "-csv", "-noheader", "-bail"],
-                             input=self.prelude + sql, capture_output=True, text=True)
+                             input=self.prelude + sql + ";", capture_output=True, text=True)
         if out.returncode != 0:
             return None
-        return int(out.stdout.strip().splitlines()[-1])
+        return [line.split(",") for line in out.stdout.strip().splitlines()]
+
+    def scalar(self, where="TRUE"):
+        rows = self.rows(f"SELECT count(*) FROM {{logs}} WHERE {where}")
+        return int(rows[-1][0]) if rows else None
 
 
 def records(batch, now_ns):
@@ -138,6 +143,45 @@ def search_all(query_url, request, page=250):
     if keys != sorted(keys, reverse=True):
         sys.exit(f"rows not newest-first for {request}")
     return rows
+
+
+WINDOW = {"start": "now-3h", "end": "now"}
+
+# (name, search request fields, the same condition as SQL for DuckDB)
+CASES = [
+    ("everything", {}, "TRUE"),
+    ("column tag", {"filters": {"service.name": "cart"}}, "service_name = 'cart'"),
+    ("map tag (log attr)", {"filters": {"attr.http.status_code": ["500", "404"]}},
+     "log_attributes['http.status_code'] IN ('500', '404')"),
+    ("map tag (resource attr)", {"filters": {"k8s.pod.name": "pod-1"}},
+     "resource_attributes['k8s.pod.name'] = 'pod-1'"),
+    ("numeric attr", {"where": {"field": "attr.http.status_code", "op": ">=", "value": 404}},
+     "TRY_CAST(log_attributes['http.status_code'] AS DOUBLE) >= 404"),
+    ("absent attr", {"where": {"field": "attr.user", "op": "not_exists"}},
+     "log_attributes['user'] IS NULL"),
+    ("grep", {"grep": "Timeout"}, "body LIKE '%Timeout%'"),
+    ("grep ignore case", {"grep": "timeout", "grep_ignore_case": True}, "body ILIKE '%timeout%'"),
+    ("regex", {"regex": r"^request 1\d* "}, r"regexp_matches(body, '^request 1\d* ')"),
+    ("severity", {"where": {"field": "severity_number", "op": ">=", "value": 17}}, "severity_number >= 17"),
+    ("combined", {"filters": {"service.name": "checkout"}, "grep": "Timeout",
+                  "where": {"field": "attr.http.status_code", "op": "!=", "value": "200"}},
+     "service_name = 'checkout' AND body LIKE '%Timeout%' "
+     "AND log_attributes['http.status_code'] IS DISTINCT FROM '200'"),
+]
+
+
+def run_cases(query_url, lake, window=WINDOW):
+    """Runs every search in CASES (all pages) and compares with DuckDB; returns the failure count"""
+    failures = 0
+    for name, extra, oracle_where in CASES:
+        started = time.time()
+        got = len(search_all(query_url, dict(window, **extra)))
+        want = lake.scalar(oracle_where)
+        ok_case = got == want and want is not None
+        failures += not ok_case
+        print(f"   {'ok ' if ok_case else 'FAIL'} {name}: {got} rows (oracle {want}) "
+              f"in {time.time() - started:.2f}s")
+    return failures
 
 
 def main():
@@ -193,36 +237,8 @@ def main():
         query_url = "http://localhost:18090"
         wait_for("query service", lambda: http("GET", f"{query_url}/ready")[0] == 200, timeout=60)
 
-        window = {"start": "now-3h", "end": "now"}
-        cases = [
-            ("everything", {}, "TRUE"),
-            ("column tag", {"filters": {"service.name": "cart"}}, "service_name = 'cart'"),
-            ("map tag (log attr)", {"filters": {"attr.http.status_code": ["500", "404"]}},
-             "log_attributes['http.status_code'] IN ('500', '404')"),
-            ("map tag (resource attr)", {"filters": {"k8s.pod.name": "pod-1"}},
-             "resource_attributes['k8s.pod.name'] = 'pod-1'"),
-            ("numeric attr", {"where": {"field": "attr.http.status_code", "op": ">=", "value": 404}},
-             "TRY_CAST(log_attributes['http.status_code'] AS DOUBLE) >= 404"),
-            ("absent attr", {"where": {"field": "attr.user", "op": "not_exists"}},
-             "log_attributes['user'] IS NULL"),
-            ("grep", {"grep": "Timeout"}, "body LIKE '%Timeout%'"),
-            ("grep ignore case", {"grep": "timeout", "grep_ignore_case": True}, "body ILIKE '%timeout%'"),
-            ("regex", {"regex": r"^request 1\d* "}, r"regexp_matches(body, '^request 1\d* ')"),
-            ("severity", {"where": {"field": "severity_number", "op": ">=", "value": 17}}, "severity_number >= 17"),
-            ("combined", {"filters": {"service.name": "checkout"}, "grep": "Timeout",
-                          "where": {"field": "attr.http.status_code", "op": "!=", "value": "200"}},
-             "service_name = 'checkout' AND body LIKE '%Timeout%' "
-             "AND log_attributes['http.status_code'] IS DISTINCT FROM '200'"),
-        ]
-        failures = 0
-        for name, extra, oracle_where in cases:
-            started = time.time()
-            got = len(search_all(query_url, dict(window, **extra)))
-            want = lake.scalar(oracle_where)
-            ok_case = got == want and want is not None
-            failures += not ok_case
-            print(f"   {'ok ' if ok_case else 'FAIL'} {name}: {got} rows (oracle {want}) "
-                  f"in {time.time() - started:.2f}s")
+        window = WINDOW
+        failures = run_cases(query_url, lake)
 
         # Latency of the common case: the newest page of 100 rows
         for name, extra in [("newest 100", {}), ("newest 100, tag", {"filters": {"service.name": "auth"}}),
