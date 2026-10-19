@@ -17,9 +17,12 @@ ctest --output-on-failure
 ./http_server_test       # Run single test
 ./appender_core_test     # Appender logic (DuckDB-free, fakes)
 ./appender_duckdb_test   # Staging and commit SQL against in-memory DuckDB
+
+# Query service (Rust, separate Cargo workspace)
+cd query && cargo build && cargo test --workspace
 ```
 
-Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`); the local stack (`tests/it/stack.sh up`) and prerequisites are in docs/integration-testing.md.
+Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`, `QUERY_IT=1`); the local stack (`tests/it/stack.sh up`) and prerequisites are in docs/integration-testing.md.
 
 The `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` flag is required for cppkafka compatibility.
 
@@ -28,7 +31,7 @@ The `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` flag is required for cppkafka compatibi
 Telemetry Lake is a C++23 pipeline for ingesting OpenTelemetry logs and writing them to Apache Iceberg tables with exactly-once semantics. Full design: `docs/design.md`.
 
 ```
-OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/MinIO, REST catalog)
+OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/MinIO, REST catalog) ← Query (HTTP :8090)
 ```
 
 **Key design decisions:**
@@ -36,11 +39,14 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 - Appender exactly-once: each Iceberg commit inserts the log rows *and* their Kafka offsets into `_appender_offsets` in one DuckDB transaction (sent as a single REST `transactions/commit`). Recovery reads that table; Kafka consumer-group offsets are only hints for lag monitoring
 - Revoked partitions are fenced: the revoke callback waits for any in-flight commit covering them (or exits) before returning
 - Nothing is skipped: undecodable messages go to a Kafka DLQ topic before their offset advances; full pipelines pause partitions
+- Appender DuckDB sessions run in UTC: Iceberg partition transforms of timestamptz are UTC, DuckDB otherwise uses the machine's zone
+- `_record_index` (position within the Kafka message) + topic/partition/offset is the unique row key; the query service's cursors depend on it
 - DuckDB (≥ 1.5.4) stages rows per partition (`duckdb::Appender`) and writes Iceberg; include it only via `src/appender/duckdb_include.hpp` (works around a C++23 incompatibility in DuckDB's headers)
 
 **Components:**
 - `otel_receiver` (src/main.cpp + src/ingester/): Crow HTTP server that accepts OTLP logs and produces to Kafka
 - `otel_appender` (src/appender/): `KafkaSource` (poll thread) → `PipelinePool` (decode/transform/stage) → `StagingRegistry` → `IcebergCommitter` → `DuckdbIcebergSink`; wired in `app.cpp`
+- `otel-query` (query/, Rust): `logquery` (IR, JSON frontend, cursors; no engine dependency) → `planner` (`FieldResolver` field namespace, IR → DataFusion exprs, paginated search) → `query-server` (axum API, `IcebergSource` table cache, read-only SQL). DataFusion 53 + iceberg-rust 0.10 (pinned together). Every frontend must lower to the IR and resolve fields through `FieldResolver`; this keeps adding LogQL a two-way door (docs/query-design.md §3)
 - Libraries: `appender_core` (DuckDB-free, tested with fakes) and `appender_duckdb`
 
 ## Configuration
@@ -49,6 +55,7 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 
 **Ingester required:** `KAFKA_BROKERS`
 **Appender required:** `KAFKA_BROKERS`, `ICEBERG_CATALOG_URI`, `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` (full list in README.md)
+**Query required:** `ICEBERG_CATALOG_URI`, `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` (`Config::from_env`, query/crates/query-server/src/config.rs; full list in query/README.md)
 
 ## Key Files
 

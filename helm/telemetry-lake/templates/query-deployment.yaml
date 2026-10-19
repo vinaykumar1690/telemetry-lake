@@ -1,0 +1,124 @@
+{{- if .Values.query.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: query
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: query
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.query.replicas }}
+  selector:
+    matchLabels:
+      app: query
+  template:
+    metadata:
+      labels:
+        app: query
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+    spec:
+      # Stateless: SIGTERM stops accepting connections and lets in-flight queries finish
+      terminationGracePeriodSeconds: {{ add .Values.query.timeoutSeconds 10 }}
+      containers:
+        - name: query
+          image: "{{ .Values.query.image.repository }}:{{ .Values.query.image.tag }}"
+          imagePullPolicy: {{ .Values.query.image.pullPolicy }}
+          env:
+            # Same catalog and table as the appender writes
+            - name: ICEBERG_CATALOG_URI
+              value: {{ .Values.appender.iceberg.catalogUri | default (include "telemetry-lake.nessieEndpoint" .) | quote }}
+            - name: ICEBERG_WAREHOUSE
+              value: {{ .Values.appender.iceberg.warehouse | default .Values.nessie.warehouse | quote }}
+            - name: ICEBERG_TABLE_NAME
+              value: {{ .Values.appender.iceberg.tableName | quote }}
+            - name: S3_ENDPOINT
+              value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appender.s3.accessKeySecret.name | default "s3-credentials" }}
+                  key: {{ .Values.appender.s3.accessKeySecret.key }}
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appender.s3.secretKeySecret.name | default "s3-credentials" }}
+                  key: {{ .Values.appender.s3.secretKeySecret.key }}
+            - name: HTTP_PORT
+              value: "8090"
+            - name: QUERY_DEFAULT_LIMIT
+              value: {{ .Values.query.defaultLimit | quote }}
+            - name: QUERY_MAX_LIMIT
+              value: {{ .Values.query.maxLimit | quote }}
+            - name: QUERY_MAX_RANGE_HOURS
+              value: {{ .Values.query.maxRangeHours | quote }}
+            - name: QUERY_TIMEOUT_SECONDS
+              value: {{ .Values.query.timeoutSeconds | quote }}
+            - name: QUERY_MAX_CONCURRENT
+              value: {{ .Values.query.maxConcurrent | quote }}
+            # Keep below the container memory limit
+            - name: QUERY_MEMORY_LIMIT_MB
+              value: {{ .Values.query.memoryLimitMB | quote }}
+            - name: TABLE_REFRESH_MS
+              value: {{ .Values.query.tableRefreshMs | quote }}
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.query.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: query
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: query
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.query.service.type }}
+  ports:
+    - port: {{ .Values.query.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: query
+{{- if .Values.query.autoscaling.enabled }}
+---
+# Elastic query capacity: replicas follow CPU. Queries are stateless, so any
+# replica serves any request (cursors carry their own state).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: query
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: query
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: query
+  minReplicas: {{ .Values.query.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.query.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.query.autoscaling.targetCPUUtilization }}
+{{- end }}
+{{- end }}

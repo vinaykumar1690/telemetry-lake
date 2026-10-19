@@ -10,8 +10,9 @@ Iceberg REST catalog (Nessie) and S3 store (MinIO). The design they verify is in
 | `tests/it/iceberg_spike.sh` | DuckDB + Nessie support everything the appender relies on: partitioned `day()` writes of `TIMESTAMPTZ`/`MAP` columns, a two-table transaction sent as one REST `transactions/commit`, a failed transaction leaving both tables unchanged, backslash round-trips. It also lists the available Iceberg maintenance functions | MinIO, Nessie, `duckdb` CLI |
 | `appender_duckdb_test --gtest_filter='IcebergIntegration*'` | The appender's own code (`DuckdbSession::openIceberg`, staging, `DuckdbIcebergSink::commit`, `DuckdbOffsetStore::lastCommitted`) creates both tables, commits rows plus offsets, and recovers the offset | MinIO, Nessie |
 | `tests/e2e/exactly_once.sh` | Exactly-once from Kafka to Iceberg under `kill -9`, a graceful restart and a rebalance between two appenders, plus poison messages going to the DLQ | MinIO, Nessie, Kafka, built binaries, `kcat`, `duckdb` CLI |
+| `tests/it/query_it.py` | The query service against real appender output: 11 search shapes (time, column and map tags, numeric and absent attributes, grep, regex, combined) and cursor pagination (no duplicate or out-of-order rows), with each total checked against DuckDB over the same table; SQL count; the time filter reaching the Iceberg scan | MinIO, Nessie, Kafka, C++ binaries, `otel-query`, `duckdb` CLI, Python 3 |
 
-All three are opt-in (`ICEBERG_IT=1` / `E2E=1`) and print `skipped` otherwise.
+All are opt-in (`ICEBERG_IT=1` / `E2E=1` / `QUERY_IT=1`) and print `skipped` otherwise.
 
 ## Prerequisites
 
@@ -25,6 +26,8 @@ Tested on macOS 15 (Intel) with Docker Desktop 28.5.
 | kcat | 1.7 | `brew install kcat` | e2e: poison messages, end offsets, DLQ count |
 | curl | 7.75 or newer (for `--aws-sigv4`) | ships with macOS | bucket creation, health checks |
 | Build toolchain | see [README.md](../README.md#how-to-build) | | `otel_receiver`, `otel_appender`, `appender_duckdb_test` |
+| Rust | 1.95 or newer (1.99 tested) | `curl https://sh.rustup.rs -sSf \| sh` (or `brew install rustup`) | `otel-query` (`cd query && cargo build`) |
+| Python | 3.9 or newer, standard library only | ships with macOS / Homebrew | `tests/it/query_it.py` |
 
 **MinIO runs on the host, not in Docker.** MinIO no longer publishes public
 container images (`minio/minio` and `quay.io/minio/minio` pulls are denied),
@@ -114,6 +117,10 @@ ICEBERG_IT=1 tests/it/iceberg_spike.sh
 
 # 3. End-to-end exactly-once (a few minutes)
 E2E=1 tests/e2e/exactly_once.sh
+
+# 4. Query service against real appender output (about 1 minute)
+(cd query && cargo build)
+QUERY_IT=1 tests/it/query_it.py
 ```
 
 `DUCKDB_HOME_DIRECTORY` is where DuckDB caches the `iceberg`/`httpfs`
@@ -168,6 +175,22 @@ is expected, not a hang.
 On failure, the appender and ingester logs are kept and their directory is
 printed. `BATCHES`, `PER_BATCH`, `POISON` and `TOPIC_PARTITIONS` scale the run.
 
+**Query test.** It creates a fresh topic (`qit-<epoch>`, 4 partitions) and
+namespace, and starts an ingester (`:14319`), an appender (`:18082`) and the
+query service (`:18090`). It then:
+1. sends 60 requests of 50 records spread over the last 100 minutes; all
+   records of a request share one timestamp, so pagination must break ties;
+2. flushes the appender until DuckDB sees all 3000 rows;
+3. pages through every search with 250-row pages, failing on any duplicate
+   or out-of-order row, and compares each total with a DuckDB `count(*)`
+   using the same condition.
+
+Each line prints `ok`/`FAIL`, the row count, the oracle count and the time
+taken; it ends with `PASS`. On failure the service logs are kept and their
+directory is printed. `BATCHES` and `PER_BATCH` scale the data. It uses
+`target/release/otel-query` when present, else the debug build, or
+`QUERY_BIN`.
+
 The e2e test covers Kafka → Iceberg. It does not crash the ingester: the
 ingester acknowledges a request before Kafka has it (see design.md §6.2), so
 client → Kafka is not exactly-once.
@@ -189,6 +212,20 @@ client → Kafka is not exactly-once.
   In both runs, every partition's durable next offset equalled its end offset,
   for example `0 44 1 55 2 54 3 52`.
 
+### Query service (2026-10-19)
+
+- **`query_it.py`: pass.** All 11 search shapes matched DuckDB exactly (for
+  example 3000/3000 rows, 1111/1111 for the regex), every page sequence was
+  duplicate-free and newest-first, the SQL count matched, and `EXPLAIN`
+  showed `predicate:[timestamp >= ...]` inside `IcebergTableScan`.
+- Its first run **found an appender bug**: DuckDB computed `day(timestamp)`
+  partition values in the laptop's time zone (PDT). Rows written late in the
+  local evening landed in the previous day's partition, which every reader
+  then pruned for recent time ranges; DuckDB and the query service agreed on
+  the wrong count, 600 of 3000. Appender sessions now run in UTC, and the
+  `ICEBERG_IT` gtest writes rows at 03:00Z and 22:00Z to catch a regression
+  (it fails without the fix).
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -198,6 +235,7 @@ client → Kafka is not exactly-once.
 | Spike fails at `PARTITIONED BY` or `MAP` | An old `duckdb` CLI is first on `PATH`; use `$DUCKDB` |
 | `MinIO is not reachable` | `brew services start minio`; check `curl localhost:9000/minio/health/live` |
 | `bind: address already in use` on 9092/19120 | Another Kafka or Nessie is running; `docker ps`, or stop the other service |
+| Time-range queries miss recent rows that `count(*)` finds | Data written by an appender built before the UTC fix on a non-UTC machine; rewrite it, or use a fresh namespace |
 | Ingester log: `Coordinator load in progress: retrying` | Harmless right after Kafka starts (idempotent producer initialization) |
 | Appender exits 2 on startup with a schema mismatch | The namespace holds tables from an older schema; use a fresh `ICEBERG_NAMESPACE` |
 

@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,8 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        // Plain text when logs go to a file or a container runtime
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 
     let config = match Config::from_env() {

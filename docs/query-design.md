@@ -18,6 +18,23 @@ Today the table is written as **one small file per Kafka-partition-day per commi
 
 ---
 
+## Status (2026-10-19)
+
+**Phase 2 (the single-node query MVP) is implemented** in `query/` ([query/README.md](../query/README.md) is the API reference). It is verified by:
+- 43 unit and HTTP tests
+- a live test, `tests/it/query_it.py`, which loads logs through the real ingester and appender and checks 11 search shapes, pagination and SQL against DuckDB
+
+Where it differs from the plan below:
+- **Three crates, not eight.** `logquery` holds the IR, the JSON frontend and cursors; `planner` holds the field resolver, lowering and the search plan; `query-server` holds HTTP, the table source, SQL and metrics. The index and indexer crates come with phase 4.
+- **SQL** is HTTP (`POST /v1/sql`) with NDJSON or Arrow IPC output. Flight SQL is deferred. The search API returns one JSON document per page; pages are bounded by `limit`, so it is not streamed.
+- **DataFusion 53, not 55.** iceberg-datafusion 0.10 pins it. Runtime row-group pruning arrives when iceberg-rust upgrades.
+- **The scan is single-stream.** `IcebergTableScan` reports one output partition; iceberg-rust reads files concurrently inside it. Splitting the planned files across partitions belongs with the index-aware scan in phases 3 and 4.
+- **Elasticity** uses a CPU-based HPA with two warm replicas. KEDA and the worker pool come with phase 5. There is no scanned-bytes limit yet; the time-range cap, timeout, memory pool and concurrency limit bound a query.
+
+The integration test also found two appender bugs, both fixed:
+- **Pagination tiebreak.** Rows had no stable unique key. The appender now writes `_record_index`, the record's position within its Kafka message.
+- **Partition time zone.** DuckDB computed `day(timestamp)` partition values in the machine's time zone, so readers pruned rows whose local date differed from their UTC date. Sessions now run in UTC.
+
 ## 1. Engine decision: Apache DataFusion + apache/iceberg-rust (Rust)
 
 | Engine | Iceberg | Interactive latency | Extensible from code | Elastic | Verdict |
@@ -50,9 +67,13 @@ Why DataFusion:
 
 ```
  JSON search API ─┐
- SQL (Flight SQL) ─┼─► LogQuery IR ─► FieldResolver ─► DataFusion LogicalPlan ─► physical plan (+ index-aware scan)
- LogQL (later) ───┘
+ LogQL (later) ───┴─► LogQuery IR ─► FieldResolver ─► DataFusion LogicalPlan ─┐
+ SQL ────────────────────────────────────► DataFusion SQL planner ─────────────┴─► physical plan (+ index-aware scan)
 ```
+
+SQL is more general than the IR, so it goes straight to DataFusion's planner.
+It still meets the same scan, and the index hooks (which match expression
+shapes, not syntax) apply to it as well.
 
 - **`LogQuery` IR** (a small Rust enum algebra):
   - `TimeRange`
