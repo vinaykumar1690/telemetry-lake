@@ -99,7 +99,7 @@ TEST_F(SinkTest, FailedCommitLeavesBothTablesUnchanged) {
 TEST_F(SinkTest, CommitSqlShape) {
     std::vector<SealedBuffer> buffers{{.partition = 0, .table = "stg_p0_g0", .max_offset = 9, .rows = 2},
                                       {.partition = 1, .table = "stg_p1_g0", .max_offset = 3, .rows = 0}};
-    const auto sql = buildCommitSql(buffers, kTables, kIdentity,
+    const auto sql = buildCommitSql(buffers, kTables, schema::TableSchema{}, kIdentity,
                                     {std::chrono::sys_days{std::chrono::year{2026} / 10 / 18}});
     EXPECT_NE(sql.find(R"(FROM "stg_p0_g0")"), std::string::npos);
     EXPECT_EQ(sql.find("stg_p1_g0"), std::string::npos);  // no rows, offsets only

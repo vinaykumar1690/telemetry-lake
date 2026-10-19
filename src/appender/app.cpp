@@ -34,7 +34,7 @@ int runAppender(const AppenderConfig& config) {
         return kExitStartup;
     }
 
-    StagingRegistry staging((*session)->database(), config.max_staged_bytes);
+    StagingRegistry staging((*session)->database(), config.max_staged_bytes, (*session)->schema());
     DuckdbIcebergSink sink(**session, tables,
                            {config.topic, config.consumer_group, config.appender_id});
     // Separate connections: the committer and recovery run on different threads
@@ -66,7 +66,8 @@ int runAppender(const AppenderConfig& config) {
                             .queue_bytes = config.pipeline_queue_bytes,
                             .topic = config.topic,
                             .retry_base_delay = config.retry_base_delay,
-                            .retry_max_delay = config.retry_max_delay},
+                            .retry_max_delay = config.retry_max_delay,
+                            .promoted_keys = (*session)->schema()->promotedKeys()},
                            staging, **dlq, on_fatal);
 
     KafkaSource source({.brokers = config.brokers,

@@ -2,6 +2,7 @@
 
 #include "sql.hpp"
 
+#include <algorithm>
 #include <array>
 #include <format>
 #include <iostream>
@@ -55,7 +56,7 @@ ErrorKind classifyDuckdbError(std::string_view message) {
     return ErrorKind::Retryable;
 }
 
-std::string columnList(std::span<const schema::Column> columns) {
+std::string columnList(std::span<const schema::ColumnDef> columns) {
     std::string out;
     for (const auto& column : columns) {
         if (!out.empty()) out += ", ";
@@ -64,17 +65,74 @@ std::string columnList(std::span<const schema::Column> columns) {
     return out;
 }
 
-Result<void> ensureTable(duckdb::Connection& conn, const std::string& qualified_name,
-                         std::span<const schema::Column> columns,
-                         std::string_view partition_clause) {
+namespace {
+
+Result<void> createIfMissing(duckdb::Connection& conn, const std::string& qualified_name,
+                             std::span<const schema::ColumnDef> columns, std::string_view partition_clause) {
     std::string ddl = std::format("CREATE TABLE IF NOT EXISTS {} (", qualified_name);
     for (std::size_t i = 0; i < columns.size(); ++i) {
-        ddl += std::format("{}{} {}", i ? ", " : "", sql::identifier(columns[i].name),
-                           columns[i].type);
+        ddl += std::format("{}{} {}", i ? ", " : "", sql::identifier(columns[i].name), columns[i].type);
     }
     ddl += ")";
     if (!partition_clause.empty()) ddl += std::format(" {}", partition_clause);
-    if (auto created = run(conn, ddl); !created) return created;
+    return run(conn, ddl);
+}
+
+}  // namespace
+
+Result<void> ensureLogsTable(duckdb::Connection& conn, const std::string& qualified_name,
+                             const schema::TableSchema& schema, std::string_view partition_clause) {
+    if (auto created = createIfMissing(conn, qualified_name, schema.logs(), partition_clause); !created) {
+        return created;
+    }
+    auto described = query(conn, std::format("DESCRIBE {}", qualified_name));
+    if (!described) return std::unexpected(described.error());
+    auto& result = **described;
+
+    const auto base = schema::kLogsColumns.size();
+    std::vector<std::string> extra;
+    std::string mismatch;
+    if (result.RowCount() < base) {
+        mismatch = std::format("has {} columns, expected at least {}", result.RowCount(), base);
+    }
+    for (std::size_t i = 0; mismatch.empty() && i < result.RowCount(); ++i) {
+        const auto name = result.GetValue(0, i).ToString();
+        const auto type = result.GetValue(1, i).ToString();
+        if (i < base) {
+            const auto& expected = schema::kLogsColumns[i];
+            if (name != expected.name || type != expected.type) {
+                mismatch = std::format("column {} is {} {}, expected {} {}", i, name, type, expected.name,
+                                       expected.type);
+            }
+        } else if (type != "VARCHAR") {
+            mismatch = std::format("column {} ({}) is {}; columns after the base ones must be VARCHAR "
+                                   "promoted attributes",
+                                   i, name, type);
+        } else {
+            extra.push_back(name);
+        }
+    }
+    if (!mismatch.empty()) return fatal(std::format("table {} {}", qualified_name, mismatch));
+
+    for (const auto& column : std::span(schema.logs()).subspan(base)) {
+        if (std::ranges::find(extra, column.name) != extra.end()) continue;
+        if (auto added = run(conn, std::format("ALTER TABLE {} ADD COLUMN {} VARCHAR", qualified_name,
+                                               sql::identifier(column.name)));
+            !added) {
+            return fatal(std::format("cannot add promoted column {} to {}: {}", column.name, qualified_name,
+                                     added.error().message));
+        }
+        std::cout << std::format("Added promoted column {} to {}\n", column.name, qualified_name);
+    }
+    return {};
+}
+
+Result<void> ensureTable(duckdb::Connection& conn, const std::string& qualified_name,
+                         std::span<const schema::ColumnDef> columns,
+                         std::string_view partition_clause) {
+    if (auto created = createIfMissing(conn, qualified_name, columns, partition_clause); !created) {
+        return created;
+    }
 
     auto described = query(conn, std::format("DESCRIBE {}", qualified_name));
     if (!described) return std::unexpected(described.error());
@@ -100,8 +158,8 @@ Result<void> ensureTable(duckdb::Connection& conn, const std::string& qualified_
     return {};
 }
 
-DuckdbSession::DuckdbSession(TableNames tables)
-    : db_(std::make_unique<duckdb::DuckDB>(nullptr)), tables_(std::move(tables)) {}
+DuckdbSession::DuckdbSession(TableNames tables, std::shared_ptr<const schema::TableSchema> schema)
+    : db_(std::make_unique<duckdb::DuckDB>(nullptr)), tables_(std::move(tables)), schema_(std::move(schema)) {}
 
 // Iceberg defines day()/hour() of a timestamptz in UTC, but DuckDB applies
 // its session time zone (by default the machine's) when it computes partition
@@ -116,15 +174,16 @@ Result<void> DuckdbSession::pinUtc() {
     return {};
 }
 
-Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openLocal(const TableNames& tables) {
+Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openLocal(
+    const TableNames& tables, std::shared_ptr<const schema::TableSchema> schema) {
     try {
-        std::unique_ptr<DuckdbSession> session(new DuckdbSession(tables));
+        std::unique_ptr<DuckdbSession> session(new DuckdbSession(tables, std::move(schema)));
         if (auto r = session->pinUtc(); !r) return std::unexpected(r.error());
         auto conn = session->connect();
-        if (auto r = ensureTable(*conn, tables.logs, schema::kLogsColumns); !r) {
+        if (auto r = ensureLogsTable(*conn, tables.logs, *session->schema()); !r) {
             return std::unexpected(r.error());
         }
-        if (auto r = ensureTable(*conn, tables.offsets, schema::kOffsetsColumns); !r) {
+        if (auto r = ensureTable(*conn, tables.offsets, schema::defs(schema::kOffsetsColumns)); !r) {
             return std::unexpected(r.error());
         }
         return session;
@@ -136,7 +195,8 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openLocal(const TableNames
 Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const AppenderConfig& config) {
     std::unique_ptr<DuckdbSession> session;
     try {
-        session.reset(new DuckdbSession({config.qualifiedLogsTable(), config.qualifiedOffsetsTable()}));
+        session.reset(new DuckdbSession({config.qualifiedLogsTable(), config.qualifiedOffsetsTable()},
+                                        std::make_shared<schema::TableSchema>()));
     } catch (const std::exception& e) {
         return fatal(std::format("cannot open DuckDB: {}", e.what()));
     }
@@ -170,12 +230,11 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const Appender
     }
 
     const auto& tables = session->tables();
-    if (auto r = ensureTable(*conn, tables.logs, schema::kLogsColumns,
-                             partitionClause(config.partition_spec));
+    if (auto r = ensureLogsTable(*conn, tables.logs, *session->schema(), partitionClause(config.partition_spec));
         !r) {
         return std::unexpected(r.error());
     }
-    if (auto r = ensureTable(*conn, tables.offsets, schema::kOffsetsColumns); !r) {
+    if (auto r = ensureTable(*conn, tables.offsets, schema::defs(schema::kOffsetsColumns)); !r) {
         return std::unexpected(r.error());
     }
     std::cout << std::format("Iceberg tables ready: {} and {}\n", tables.logs, tables.offsets);

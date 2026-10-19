@@ -4,6 +4,7 @@
 #include "error.hpp"
 #include "log_row.hpp"
 #include "sealed_buffer.hpp"
+#include "schema.hpp"
 #include "sink.hpp"
 
 #include "duckdb_include.hpp"
@@ -49,7 +50,8 @@ private:
 // starts a new one, so appends never wait for an Iceberg commit.
 class PartitionStaging : public PartitionWriter {
 public:
-    PartitionStaging(duckdb::DuckDB& db, std::int32_t partition, ByteBudget& budget);
+    PartitionStaging(duckdb::DuckDB& db, std::int32_t partition, ByteBudget& budget,
+                     std::shared_ptr<const schema::TableSchema> schema);
     ~PartitionStaging();
 
     PartitionStaging(const PartitionStaging&) = delete;
@@ -81,6 +83,7 @@ private:
 
     const std::int32_t partition_;
     ByteBudget& budget_;
+    const std::shared_ptr<const schema::TableSchema> schema_;
     mutable std::mutex mutex_;
     duckdb::Connection conn_;
     std::uint64_t generation_ = 0;
@@ -95,7 +98,8 @@ private:
 // The staging buffers of all partitions currently assigned to this process
 class StagingRegistry : public StagingSource, public StagingLookup {
 public:
-    StagingRegistry(duckdb::DuckDB& db, std::size_t max_staged_bytes);
+    StagingRegistry(duckdb::DuckDB& db, std::size_t max_staged_bytes,
+                    std::shared_ptr<const schema::TableSchema> schema = std::make_shared<schema::TableSchema>());
 
     Result<void> add(std::int32_t partition);
     void remove(std::int32_t partition);  // discards unsealed rows
@@ -122,6 +126,7 @@ public:
 private:
     duckdb::DuckDB& db_;
     ByteBudget budget_;
+    const std::shared_ptr<const schema::TableSchema> schema_;
     mutable std::mutex mutex_;
     std::map<std::int32_t, std::shared_ptr<PartitionStaging>> partitions_;
     std::mutex drop_mutex_;

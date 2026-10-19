@@ -53,6 +53,14 @@ Attributes toAttributes(const google::protobuf::RepeatedPtrField<KeyValue>& kvs)
     return out;
 }
 
+// The value the MAP column keeps for a repeated key: the last one
+const std::string* lastValue(const Attributes& attributes, std::string_view key) {
+    for (auto it = attributes.rbegin(); it != attributes.rend(); ++it) {
+        if (it->first == key) return &it->second;
+    }
+    return nullptr;
+}
+
 std::string_view lookup(const Attributes& attributes, std::string_view key) {
     for (const auto& [k, v] : attributes) {
         if (k == key) return v;
@@ -121,7 +129,8 @@ std::string anyValueToString(const AnyValue& value) {
 }
 
 void transformLogs(const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request,
-                   KafkaCoordinates source, std::vector<LogRow>& out) {
+                   KafkaCoordinates source, std::vector<LogRow>& out,
+                   std::span<const std::string> promoted_keys) {
     std::int32_t record_index = 0;
     for (const auto& resource_logs : request.resource_logs()) {
         const auto resource = resourceFields(resource_logs.resource());
@@ -155,6 +164,15 @@ void transformLogs(const opentelemetry::proto::collector::logs::v1::ExportLogsSe
                 row.scope = scope;
                 row.attributes = toAttributes(record.attributes());
                 row.dropped_attributes_count = record.dropped_attributes_count();
+
+                if (!promoted_keys.empty()) {
+                    row.promoted.reserve(promoted_keys.size());
+                    for (const auto& key : promoted_keys) {
+                        const std::string* value = lastValue(row.attributes, key);
+                        if (!value) value = lastValue(resource->attributes, key);
+                        row.promoted.push_back(value ? *value : std::string());
+                    }
+                }
             }
         }
     }

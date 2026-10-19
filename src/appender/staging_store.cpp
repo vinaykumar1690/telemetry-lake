@@ -13,7 +13,7 @@
 namespace appender {
 namespace {
 
-static_assert(schema::kStagedColumns.size() == 23, "append order below must match the schema");
+static_assert(schema::kStagedColumns.size() == 23, "append order below must match the base schema");
 
 void appendNull(duckdb::Appender& appender) {
     appender.Append<std::nullptr_t>(nullptr);
@@ -85,8 +85,9 @@ bool ByteBudget::waitBelowCap(std::chrono::milliseconds timeout) {
     return below_cap_.wait_for(lock, timeout, [&] { return used_ < cap_; });
 }
 
-PartitionStaging::PartitionStaging(duckdb::DuckDB& db, std::int32_t partition, ByteBudget& budget)
-    : partition_(partition), budget_(budget), conn_(db) {}
+PartitionStaging::PartitionStaging(duckdb::DuckDB& db, std::int32_t partition, ByteBudget& budget,
+                                   std::shared_ptr<const schema::TableSchema> schema)
+    : partition_(partition), budget_(budget), schema_(std::move(schema)), conn_(db) {}
 
 PartitionStaging::~PartitionStaging() {
     std::lock_guard lock(mutex_);
@@ -104,9 +105,9 @@ Result<void> PartitionStaging::init() {
 Result<void> PartitionStaging::createGeneration() {
     std::string table = std::format("stg_p{}_g{}", partition_, generation_);
     std::string ddl = std::format("CREATE TABLE {} (", sql::identifier(table));
-    for (std::size_t i = 0; i < schema::kStagedColumns.size(); ++i) {
-        ddl += std::format("{}{} {}", i ? ", " : "", sql::identifier(schema::kStagedColumns[i].name),
-                           schema::kStagedColumns[i].type);
+    const auto& columns = schema_->staged();
+    for (std::size_t i = 0; i < columns.size(); ++i) {
+        ddl += std::format("{}{} {}", i ? ", " : "", sql::identifier(columns[i].name), columns[i].type);
     }
     ddl += ")";
     if (auto created = query(conn_, ddl); !created) return std::unexpected(created.error());
@@ -163,6 +164,10 @@ Result<void> PartitionStaging::append(std::span<const LogRow> rows, std::int64_t
                     appender.Append<duckdb::Value>(resource_map);
                     appender.Append<duckdb::Value>(mapValue(row.attributes));
                     appender.Append<std::int64_t>(row.dropped_attributes_count);
+                    // Promoted attributes, in schema order (absent: NULL)
+                    for (std::size_t i = 0; i < schema_->promotedKeys().size(); ++i) {
+                        appendText(appender, i < row.promoted.size() ? std::string_view(row.promoted[i]) : "");
+                    }
                     appender.EndRow();
                 }
                 appender.Close();
@@ -229,11 +234,12 @@ std::optional<std::chrono::steady_clock::time_point> PartitionStaging::oldestRow
     return first_append_;
 }
 
-StagingRegistry::StagingRegistry(duckdb::DuckDB& db, std::size_t max_staged_bytes)
-    : db_(db), budget_(max_staged_bytes), drop_conn_(db) {}
+StagingRegistry::StagingRegistry(duckdb::DuckDB& db, std::size_t max_staged_bytes,
+                                 std::shared_ptr<const schema::TableSchema> schema)
+    : db_(db), budget_(max_staged_bytes), schema_(std::move(schema)), drop_conn_(db) {}
 
 Result<void> StagingRegistry::add(std::int32_t partition) {
-    auto staging = std::make_shared<PartitionStaging>(db_, partition, budget_);
+    auto staging = std::make_shared<PartitionStaging>(db_, partition, budget_, schema_);
     std::lock_guard lock(mutex_);
     if (partitions_.contains(partition)) return {};
     if (auto r = staging->init(); !r) return r;

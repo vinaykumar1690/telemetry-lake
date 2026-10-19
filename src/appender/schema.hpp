@@ -2,7 +2,10 @@
 #define APPENDER_SCHEMA_HPP
 
 #include <array>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace appender::schema {
 
@@ -62,6 +65,54 @@ inline constexpr std::array kOffsetsColumns{
     Column{"last_offset", "BIGINT"},
     Column{"committed_at", "TIMESTAMP WITH TIME ZONE"},
     Column{"appender_id", "VARCHAR"},
+};
+
+// A column of a schema built at runtime
+struct ColumnDef {
+    std::string name;
+    std::string type;
+};
+
+template <std::size_t N>
+std::vector<ColumnDef> defs(const std::array<Column, N>& columns) {
+    std::vector<ColumnDef> out;
+    out.reserve(N);
+    for (const auto& column : columns) out.push_back({std::string(column.name), std::string(column.type)});
+    return out;
+}
+
+// Column of a promoted attribute: the key with '.' replaced by '_'
+// (k8s.pod.name -> k8s_pod_name), which is how the query service maps a
+// dotted field name to a column
+inline std::string promotedColumnName(std::string_view key) {
+    std::string name(key);
+    for (char& c : name) {
+        if (c == '.') c = '_';
+    }
+    return name;
+}
+
+// The logs table as this appender writes it: the base columns, then one
+// VARCHAR column per promoted attribute (appended last, in configured order)
+class TableSchema {
+public:
+    explicit TableSchema(std::vector<std::string> promoted_keys = {})
+        : promoted_keys_(std::move(promoted_keys)), logs_(defs(kLogsColumns)), staged_(defs(kStagedColumns)) {
+        for (const auto& key : promoted_keys_) {
+            ColumnDef column{promotedColumnName(key), "VARCHAR"};
+            logs_.push_back(column);
+            staged_.push_back(std::move(column));
+        }
+    }
+
+    const std::vector<ColumnDef>& logs() const { return logs_; }
+    const std::vector<ColumnDef>& staged() const { return staged_; }
+    const std::vector<std::string>& promotedKeys() const { return promoted_keys_; }
+
+private:
+    std::vector<std::string> promoted_keys_;
+    std::vector<ColumnDef> logs_;
+    std::vector<ColumnDef> staged_;
 };
 
 }  // namespace appender::schema

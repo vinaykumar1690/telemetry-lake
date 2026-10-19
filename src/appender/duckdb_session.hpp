@@ -39,27 +39,38 @@ public:
 
     // Plain DuckDB with the two tables in the default schema; used by tests
     // in place of Iceberg
-    static Result<std::unique_ptr<DuckdbSession>> openLocal(const TableNames& tables);
+    static Result<std::unique_ptr<DuckdbSession>> openLocal(
+        const TableNames& tables,
+        std::shared_ptr<const schema::TableSchema> schema = std::make_shared<schema::TableSchema>());
 
     duckdb::DuckDB& database() { return *db_; }
     const TableNames& tables() const { return tables_; }
+    const std::shared_ptr<const schema::TableSchema>& schema() const { return schema_; }
     std::unique_ptr<duckdb::Connection> connect() { return std::make_unique<duckdb::Connection>(*db_); }
 
 private:
-    explicit DuckdbSession(TableNames tables);
+    DuckdbSession(TableNames tables, std::shared_ptr<const schema::TableSchema> schema);
     Result<void> pinUtc();
 
     std::unique_ptr<duckdb::DuckDB> db_;
     TableNames tables_;
+    std::shared_ptr<const schema::TableSchema> schema_;
 };
 
 // CREATE TABLE IF NOT EXISTS with the given columns (and partition clause),
 // then checks that the existing table has exactly those columns
 Result<void> ensureTable(duckdb::Connection& conn, const std::string& qualified_name,
-                         std::span<const schema::Column> columns,
+                         std::span<const schema::ColumnDef> columns,
                          std::string_view partition_clause = {});
 
-std::string columnList(std::span<const schema::Column> columns);
+// The logs table: like ensureTable for the base columns, which must come
+// first and match exactly. After them, every column must be VARCHAR (a
+// promoted attribute, current or former); configured promoted columns that
+// are missing are added. Former ones stay and are written as NULL.
+Result<void> ensureLogsTable(duckdb::Connection& conn, const std::string& qualified_name,
+                             const schema::TableSchema& schema, std::string_view partition_clause = {});
+
+std::string columnList(std::span<const schema::ColumnDef> columns);
 
 }  // namespace appender
 

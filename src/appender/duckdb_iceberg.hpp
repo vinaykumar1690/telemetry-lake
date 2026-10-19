@@ -29,6 +29,7 @@ public:
 private:
     std::unique_ptr<duckdb::Connection> conn_;
     TableNames tables_;
+    std::shared_ptr<const schema::TableSchema> schema_;
     SinkIdentity identity_;
 };
 
@@ -51,7 +52,8 @@ private:
 
 // SQL text for one commit; exposed for tests
 std::string buildCommitSql(std::span<const SealedBuffer> buffers, const TableNames& tables,
-                           const SinkIdentity& identity, const CommitContext& context);
+                           const schema::TableSchema& schema, const SinkIdentity& identity,
+                           const CommitContext& context);
 
 }  // namespace appender
 

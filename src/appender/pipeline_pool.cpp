@@ -145,7 +145,7 @@ void PipelinePool::process(Worker& worker, const Work& work) {
     }
 
     std::vector<LogRow> rows;
-    transformLogs(*decoded, {work.partition, work.offset}, rows);
+    transformLogs(*decoded, {work.partition, work.offset}, rows, options_.promoted_keys);
 
     // Backpressure: wait while staging is over its byte cap
     while (!staging_.waitForCapacity(std::chrono::milliseconds(200))) {

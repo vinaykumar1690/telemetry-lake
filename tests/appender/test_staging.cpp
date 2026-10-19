@@ -86,11 +86,11 @@ TEST_F(StagingTest, SessionTimeZoneIsUtc) {
 
 TEST_F(StagingTest, EnsureTableRejectsDifferentSchema) {
     ASSERT_TRUE(query(*conn_, "CREATE TABLE other (a INTEGER)"));
-    auto result = ensureTable(*conn_, "other", schema::kOffsetsColumns);
+    auto result = ensureTable(*conn_, "other", schema::defs(schema::kOffsetsColumns));
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().kind, ErrorKind::Fatal);
     // Same columns are accepted on the second call
-    EXPECT_TRUE(ensureTable(*conn_, "offsets", schema::kOffsetsColumns));
+    EXPECT_TRUE(ensureTable(*conn_, "offsets", schema::defs(schema::kOffsetsColumns)));
 }
 
 TEST_F(StagingTest, AppendSealRoundTripsValues) {

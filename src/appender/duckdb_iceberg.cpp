@@ -15,7 +15,8 @@ std::string timestampLiteral(std::chrono::system_clock::time_point tp) {
 }
 
 std::string insertLogsSql(std::span<const SealedBuffer> buffers, const TableNames& tables,
-                          const SinkIdentity& identity, const std::string& ingested_at) {
+                          const schema::TableSchema& schema, const SinkIdentity& identity,
+                          const std::string& ingested_at) {
     std::string selects;
     for (const auto& buffer : buffers) {
         if (buffer.rows == 0) continue;
@@ -23,7 +24,7 @@ std::string insertLogsSql(std::span<const SealedBuffer> buffers, const TableName
         // The topic and _ingested_at are constants per commit; every other
         // column comes from the staging table, in the logs table's order
         std::string values;
-        for (const auto& column : schema::kLogsColumns) {
+        for (const auto& column : schema.logs()) {
             if (!values.empty()) values += ", ";
             if (column.name == "_kafka_topic") values += sql::literal(identity.topic);
             else if (column.name == "_ingested_at") values += ingested_at;
@@ -32,16 +33,16 @@ std::string insertLogsSql(std::span<const SealedBuffer> buffers, const TableName
         selects += std::format("SELECT {} FROM {}", values, sql::identifier(buffer.table));
     }
     if (selects.empty()) return {};
-    return std::format("INSERT INTO {} ({})\n{}", tables.logs, columnList(schema::kLogsColumns),
-                       selects);
+    return std::format("INSERT INTO {} ({})\n{}", tables.logs, columnList(schema.logs()), selects);
 }
 
 }  // namespace
 
 std::string buildCommitSql(std::span<const SealedBuffer> buffers, const TableNames& tables,
-                           const SinkIdentity& identity, const CommitContext& context) {
+                           const schema::TableSchema& schema, const SinkIdentity& identity,
+                           const CommitContext& context) {
     const auto now = timestampLiteral(context.ingested_at);
-    std::string statements = insertLogsSql(buffers, tables, identity, now);
+    std::string statements = insertLogsSql(buffers, tables, schema, identity, now);
     if (!statements.empty()) statements += ";\n";
 
     std::string values;
@@ -52,13 +53,16 @@ std::string buildCommitSql(std::span<const SealedBuffer> buffers, const TableNam
                               now, sql::literal(identity.appender_id));
     }
     statements += std::format("INSERT INTO {} ({}) VALUES {};", tables.offsets,
-                              columnList(schema::kOffsetsColumns), values);
+                              columnList(schema::defs(schema::kOffsetsColumns)), values);
     return statements;
 }
 
 DuckdbIcebergSink::DuckdbIcebergSink(DuckdbSession& session, TableNames tables,
                                      SinkIdentity identity)
-    : conn_(session.connect()), tables_(std::move(tables)), identity_(std::move(identity)) {}
+    : conn_(session.connect()),
+      tables_(std::move(tables)),
+      schema_(session.schema()),
+      identity_(std::move(identity)) {}
 
 Result<void> DuckdbIcebergSink::commit(std::span<const SealedBuffer> buffers,
                                        const CommitContext& context) {
@@ -68,7 +72,7 @@ Result<void> DuckdbIcebergSink::commit(std::span<const SealedBuffer> buffers,
         return std::unexpected(begun.error());
     }
     // Everything before COMMIT only writes data files; nothing is visible yet
-    if (auto inserted = query(*conn_, buildCommitSql(buffers, tables_, identity_, context));
+    if (auto inserted = query(*conn_, buildCommitSql(buffers, tables_, *schema_, identity_, context));
         !inserted) {
         (void)query(*conn_, "ROLLBACK");
         return std::unexpected(inserted.error());

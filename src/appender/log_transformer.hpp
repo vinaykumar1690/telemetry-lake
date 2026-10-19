@@ -5,6 +5,7 @@
 #include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,9 +18,11 @@ struct KafkaCoordinates {
 };
 
 // Flattens every log record of request into out (appending). Pure and
-// deterministic: the same input always yields the same rows.
+// deterministic: the same input always yields the same rows. promoted_keys
+// fills LogRow::promoted (record attribute first, then resource attribute).
 void transformLogs(const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request,
-                   KafkaCoordinates source, std::vector<LogRow>& out);
+                   KafkaCoordinates source, std::vector<LogRow>& out,
+                   std::span<const std::string> promoted_keys = {});
 
 // Severity text for an OTLP severity number ("" for 0 / out of range)
 std::string_view severityName(int severity_number);

@@ -44,6 +44,7 @@ struct PipelineOptions {
     std::chrono::milliseconds retry_base_delay{200};
     std::chrono::milliseconds retry_max_delay{10'000};
     int max_append_attempts = 10;  // staging failures beyond this are fatal
+    std::vector<std::string> promoted_keys;  // TableSchema::promotedKeys()
 };
 
 struct PipelineStats {

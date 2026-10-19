@@ -54,6 +54,10 @@ struct LogRow {
     std::shared_ptr<const ScopeFields> scope;
     Attributes attributes;
     std::uint32_t dropped_attributes_count = 0;
+
+    // Values of the promoted attributes, in TableSchema order: the record's
+    // attribute, else the resource's; empty (stored as NULL) when absent
+    std::vector<std::string> promoted;
 };
 
 }  // namespace appender
