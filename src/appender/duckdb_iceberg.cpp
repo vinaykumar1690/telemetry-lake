@@ -20,10 +20,16 @@ std::string insertLogsSql(std::span<const SealedBuffer> buffers, const TableName
     for (const auto& buffer : buffers) {
         if (buffer.rows == 0) continue;
         if (!selects.empty()) selects += "\nUNION ALL ";
-        selects += std::format("SELECT {}, {}, {}, {} FROM {}", sql::literal(identity.topic),
-                               "_kafka_partition, _kafka_offset", ingested_at,
-                               columnList(std::span(schema::kStagedColumns).subspan(2)),
-                               sql::identifier(buffer.table));
+        // The topic and _ingested_at are constants per commit; every other
+        // column comes from the staging table, in the logs table's order
+        std::string values;
+        for (const auto& column : schema::kLogsColumns) {
+            if (!values.empty()) values += ", ";
+            if (column.name == "_kafka_topic") values += sql::literal(identity.topic);
+            else if (column.name == "_ingested_at") values += ingested_at;
+            else values += sql::identifier(column.name);
+        }
+        selects += std::format("SELECT {} FROM {}", values, sql::identifier(buffer.table));
     }
     if (selects.empty()) return {};
     return std::format("INSERT INTO {} ({})\n{}", tables.logs, columnList(schema::kLogsColumns),

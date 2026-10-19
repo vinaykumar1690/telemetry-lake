@@ -13,7 +13,7 @@
 namespace appender {
 namespace {
 
-static_assert(schema::kStagedColumns.size() == 22, "append order below must match the schema");
+static_assert(schema::kStagedColumns.size() == 23, "append order below must match the schema");
 
 void appendNull(duckdb::Appender& appender) {
     appender.Append<std::nullptr_t>(nullptr);
@@ -128,6 +128,7 @@ Result<void> PartitionStaging::append(std::span<const LogRow> rows, std::int64_t
                     appender.BeginRow();
                     appender.Append<std::int32_t>(row.kafka_partition);
                     appender.Append<std::int64_t>(row.kafka_offset);
+                    appender.Append<std::int32_t>(row.record_index);
                     if (row.timestamp_us) {
                         appender.Append<duckdb::Value>(
                             duckdb::Value::TIMESTAMPTZ(duckdb::timestamp_tz_t(*row.timestamp_us)));

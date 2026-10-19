@@ -30,6 +30,7 @@ protected:
             LogRow row;
             row.kafka_partition = partition;
             row.kafka_offset = first_offset + i;
+            row.record_index = i;
             row.body = std::format("p{} o{}", partition, first_offset + i);
             rows.push_back(std::move(row));
         }
@@ -62,6 +63,7 @@ TEST_F(SinkTest, CommitWritesRowsAndOffsetsTogether) {
     EXPECT_EQ(count("SELECT count(*) FROM logs WHERE _kafka_topic = 'otel-logs'"), 5);
     EXPECT_EQ(count("SELECT count(DISTINCT _ingested_at) FROM logs"), 1);
     EXPECT_EQ(count("SELECT count(*) FROM logs WHERE body = 'p1 o8'"), 1);
+    EXPECT_EQ(count("SELECT _record_index FROM logs WHERE body = 'p1 o8'"), 1);
     EXPECT_EQ(count("SELECT count(*) FROM offsets"), 2);
     EXPECT_EQ(count("SELECT last_offset FROM offsets WHERE \"partition\" = 0"), 102);
     EXPECT_EQ(count("SELECT count(*) FROM offsets WHERE consumer_group = 'group-a' "

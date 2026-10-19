@@ -34,6 +34,7 @@ struct ScopeFields {
 struct LogRow {
     std::int32_t kafka_partition = 0;
     std::int64_t kafka_offset = 0;
+    std::int32_t record_index = 0;  // position within the Kafka message
 
     // Event time in microseconds since the epoch: time_unix_nano, else
     // observed_time_unix_nano, else unset (NULL)

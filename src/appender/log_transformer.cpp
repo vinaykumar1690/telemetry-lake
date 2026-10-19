@@ -122,6 +122,7 @@ std::string anyValueToString(const AnyValue& value) {
 
 void transformLogs(const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request,
                    KafkaCoordinates source, std::vector<LogRow>& out) {
+    std::int32_t record_index = 0;
     for (const auto& resource_logs : request.resource_logs()) {
         const auto resource = resourceFields(resource_logs.resource());
         for (const auto& scope_logs : resource_logs.scope_logs()) {
@@ -133,6 +134,7 @@ void transformLogs(const opentelemetry::proto::collector::logs::v1::ExportLogsSe
                 LogRow& row = out.emplace_back();
                 row.kafka_partition = source.partition;
                 row.kafka_offset = source.offset;
+                row.record_index = record_index++;
 
                 row.time_unix_nano = record.time_unix_nano();
                 row.observed_time_unix_nano = record.observed_time_unix_nano();

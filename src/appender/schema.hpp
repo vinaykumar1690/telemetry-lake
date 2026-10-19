@@ -17,6 +17,9 @@ inline constexpr std::array kLogsColumns{
     Column{"_kafka_topic", "VARCHAR"},
     Column{"_kafka_partition", "INTEGER"},
     Column{"_kafka_offset", "BIGINT"},
+    // Position of the record within its Kafka message; with the topic,
+    // partition and offset it identifies a row uniquely and stably
+    Column{"_record_index", "INTEGER"},
     Column{"_ingested_at", "TIMESTAMP WITH TIME ZONE"},
     Column{"timestamp", "TIMESTAMP WITH TIME ZONE"},
     Column{"time_unix_nano", "BIGINT"},

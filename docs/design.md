@@ -216,7 +216,7 @@ Step by step, with code:
    ```sql
    BEGIN TRANSACTION;
    INSERT INTO lake."default"."logs" (...)
-     SELECT 'otel-logs', _kafka_partition, _kafka_offset, TIMESTAMPTZ '…' /*_ingested_at*/, … FROM "stg_p0_g7"
+     SELECT 'otel-logs', _kafka_partition, _kafka_offset, _record_index, TIMESTAMPTZ '…' /*_ingested_at*/, … FROM "stg_p0_g7"
      UNION ALL SELECT … FROM "stg_p3_g2";
    INSERT INTO lake."default"."_appender_offsets" VALUES
      ('otel-appender', 'otel-logs', 0, 81234, TIMESTAMPTZ '…', 'appender-0'),
@@ -299,7 +299,7 @@ Within a Kafka partition, rows are staged and committed in offset order:
 - parked messages are never overtaken ([`FlowControl::offer`](../src/appender/flow_control.cpp#L22))
 - generations of a partition are committed in order
 
-Across partitions there is no order, matching Kafka. Iceberg does not preserve row order for readers anyway; `(_kafka_partition, _kafka_offset)` gives a total order per partition if one is needed.
+Across partitions there is no order, matching Kafka. Iceberg does not preserve row order for readers anyway; `(_kafka_partition, _kafka_offset, _record_index)` gives a total order per partition if one is needed.
 
 ### 6.7 What the Kafka consumer-group offsets mean
 
@@ -325,6 +325,7 @@ When Iceberg is down, the appender stops consuming once `MAX_STAGED_MB` is reach
 | Column | Type | Source |
 |---|---|---|
 | `_kafka_topic`, `_kafka_partition`, `_kafka_offset` | VARCHAR, INTEGER, BIGINT | Kafka coordinates of the request the record came from |
+| `_record_index` | INTEGER | position of the record within that request; with the Kafka coordinates, a unique and stable row key (used for pagination cursors) |
 | `_ingested_at` | TIMESTAMPTZ | commit time (same for the whole commit) |
 | `timestamp` | TIMESTAMPTZ (µs) | `time_unix_nano`, else `observed_time_unix_nano`, else NULL |
 | `time_unix_nano`, `observed_time_unix_nano` | BIGINT | lossless originals |

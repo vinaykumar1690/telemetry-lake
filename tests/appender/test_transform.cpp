@@ -106,6 +106,17 @@ TEST(LogTransformerTest, SharesResourceAndScopeAcrossRecords) {
     EXPECT_EQ(rows[0].scope.get(), rows[1].scope.get());
 }
 
+TEST(LogTransformerTest, NumbersRecordsWithinTheMessage) {
+    auto request = sampleRequest();
+    auto* resource_logs = request.add_resource_logs();
+    *resource_logs = request.resource_logs(0);  // records in a second ResourceLogs continue the count
+    std::vector<LogRow> rows(1);                // rows from earlier messages do not
+    transformLogs(request, {}, rows);
+    ASSERT_EQ(rows.size(), 3u);
+    EXPECT_EQ(rows[1].record_index, 0);
+    EXPECT_EQ(rows[2].record_index, 1);
+}
+
 TEST(LogTransformerTest, AppendsToExistingRows) {
     std::vector<LogRow> rows(2);
     transformLogs(sampleRequest(), {}, rows);
