@@ -20,6 +20,9 @@ ctest --output-on-failure
 
 # Query service (Rust, separate Cargo workspace)
 cd query && cargo build && cargo test --workspace
+
+# UI (React + TS + Vite; npm run dev proxies /api to localhost:8090 and :4318)
+cd ui && npm ci && npm test && npm run build
 ```
 
 Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`, `QUERY_IT=1`, `COMPACTION_IT=1`); the local stack (`tests/it/stack.sh up`) and prerequisites are in docs/integration-testing.md.
@@ -49,6 +52,7 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 - `otel_receiver` (src/main.cpp + src/ingester/): Crow HTTP server that accepts OTLP logs and produces to Kafka
 - `otel_appender` (src/appender/): `KafkaSource` (poll thread) → `PipelinePool` (decode/transform/stage) → `StagingRegistry` → `IcebergCommitter` → `DuckdbIcebergSink`; wired in `app.cpp`
 - `otel-query` (query/, Rust): `logquery` (IR, JSON frontend, cursors; no engine dependency) → `planner` (`FieldResolver` field namespace, IR → DataFusion exprs, paginated search) → `logscan` (`LogsTableProvider`/`LogsScanExec`: partitioned Iceberg scan, `LogsScanCodec` for workers) → `query-server` (axum API, `IcebergSource` table cache, read-only SQL, `distributed.rs`: datafusion-distributed handlers, `--worker` mode). DataFusion 55 with iceberg-rust and apache/datafusion-iceberg pinned by git revision (no release supports DF 55 yet); plain EXPLAIN hides distribution, use EXPLAIN ANALYZE. Every frontend must lower to the IR and resolve fields through `FieldResolver`; this keeps adding LogQL a two-way door (docs/query-design.md §3)
+- `ui/` (React, Vite): Search tab (`/v1/search`; facets and histogram via `/v1/sql`) and Generate tab (OTLP/JSON built in the browser, POSTed to the ingester). nginx (`ui/nginx.conf.template`) serves it and proxies `/api/query/` and `/api/ingest/`, resolving upstreams per request, so they must be fully qualified names. Pure logic (`buildRequest.ts`, `facets.ts`, `generate.ts`, `send.ts`) is unit-tested with Vitest
 - Libraries: `appender_core` (DuckDB-free, tested with fakes) and `appender_duckdb`
 
 ## Configuration

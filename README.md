@@ -21,7 +21,7 @@ The full design, including the guarantees each hop gives and the reasons for the
                      └─────────────────────────┘      └──────────────────┘
                                   ▲
                      ┌────────────┴────────────┐      ┌──────────────────┐
-                     │ Query (otel-query)      │◀─────│ Clients          │
+                     │ Query (otel-query)      │◀─────│ Clients, UI      │
                      │ :8090  search / SQL     │      │ (search API, SQL)│
                      └─────────────────────────┘      └──────────────────┘
 ```
@@ -29,6 +29,7 @@ The full design, including the guarantees each hop gives and the reasons for the
 - **Ingester** (`otel_receiver`, `src/ingester/`): a Crow HTTP server on port 4318. It validates `POST /v1/logs` requests (size, media type, gzip), sheds load with 503 when too many produces are in flight, and wraps the decompressed body, unparsed, in a `RawTelemetryMessage` ([proto/telemetry_wrapper.proto](proto/telemetry_wrapper.proto)) that it produces to Kafka with an idempotent, `acks=all` producer.
 - **Appender** (`otel_appender`, `src/appender/`): consumes the topic, decodes OTLP (protobuf or JSON), transforms each log record into a row, and stages rows per Kafka partition in in-memory DuckDB. On size, age or flush triggers it commits the staged rows to Iceberg.
 - **Query** (`otel-query`, Rust, `query/`): log search (time ranges, tags on columns and attribute maps, grep and regex, cursor pagination) and read-only SQL over the logs table, executed in-process by Apache DataFusion with iceberg-rust. API reference: [query/README.md](query/README.md); design: [docs/query-design.md](docs/query-design.md).
+- **UI** (React, `ui/`): log search (time range, filters on service, severity, pod and other top-level fields, grep and regex, a volume histogram) over the query service, and a generator that sends synthetic logs from chosen services and pods over a time range to the ingester. nginx serves it and proxies both APIs; see [ui/README.md](ui/README.md).
 
 ### Guarantees in brief
 
@@ -218,6 +219,8 @@ curl -s localhost:8090/v1/sql -d '{"sql": "SELECT service_name, count(*) AS n FR
 
 The search API, field names, pagination and SQL rules are in [query/README.md](query/README.md).
 
+For the web UI, with the ingester and `otel-query` running: `cd ui && npm ci && npm run dev`, then open http://localhost:5173 ([ui/README.md](ui/README.md)).
+
 ### 4. Stop
 
 ```bash
@@ -228,14 +231,17 @@ Data files stay in the MinIO bucket; see [Cleaning up](docs/integration-testing.
 
 ### Kubernetes
 
-The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, the query service and its distributed query workers (each with a CPU autoscaler), the compaction and Nessie GC CronJobs, Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
+The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, the query service and its distributed query workers (each with a CPU autoscaler), the UI, the compaction and Nessie GC CronJobs, Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
 
 ```bash
 docker build -f docker/ingester/Dockerfile -t telemetry-lake/ingester:latest .
 docker build -f docker/appender/Dockerfile -t telemetry-lake/appender:latest .
 docker build -f docker/query/Dockerfile -t telemetry-lake/query:latest .
 docker build -f docker/compaction/Dockerfile -t telemetry-lake/compaction:latest .
+docker build -f docker/ui/Dockerfile -t telemetry-lake/ui:latest .
 ```
+
+Open the UI from your laptop with `kubectl port-forward -n telemetry-lake svc/ui 8080:80` and http://localhost:8080.
 
 ## Configuration
 
@@ -384,7 +390,7 @@ ctest --output-on-failure
 | `appender_core_test` | Config validation, OTLP protobuf/JSON decoding, transformation, bounded queues, backoff, pipeline ordering/poison/backpressure, commit protocol (retries, indeterminate commits, fencing), DLQ headers |
 | `appender_duckdb_test` | Staging round-trips (quotes, backslashes, NUL, invalid UTF-8), generation sealing, atomic two-table commits, offset recovery |
 
-The query service has its own Rust tests: `cd query && cargo test --workspace`.
+The query service has its own Rust tests: `cd query && cargo test --workspace`. The UI's: `cd ui && npm ci && npm test`.
 
 Tests against live Kafka, Nessie and MinIO are opt-in. With the [local stack](#running-the-stack-locally) up and its environment loaded:
 
@@ -425,12 +431,13 @@ telemetry-lake/
 │       └── dlq_producer.*, health*.*
 ├── query/                          # Rust query service (see query/README.md)
 │   └── crates/{logquery,planner,query-server}
+├── ui/                             # web UI: search + log generator (see ui/README.md)
 ├── tests/
 │   ├── test_http_server.cpp, appender/  # unit tests
 │   ├── it/                         # local stack, spikes, query_it.py, compaction_it.py
 │   └── e2e/exactly_once.sh
 ├── compaction/compact.py           # Iceberg maintenance job (Spark)
-├── docker/                         # ingester, appender, query and compaction Dockerfiles
+├── docker/                         # ingester, appender, query, compaction and UI Dockerfiles
 ├── helm/telemetry-lake/            # Helm chart
 └── docs/
     ├── design.md                   # architecture and guarantees

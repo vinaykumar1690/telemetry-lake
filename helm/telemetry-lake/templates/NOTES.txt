@@ -12,6 +12,12 @@ Components:
 {{- if .Values.appender.enabled }}
   - Appender (Kafka consumer -> Iceberg writer)
 {{- end }}
+{{- if .Values.query.enabled }}
+  - Query service (log search and read-only SQL over Iceberg)
+{{- end }}
+{{- if .Values.ui.enabled }}
+  - UI (log search + log generator)
+{{- end }}
 {{- if .Values.kafka.enabled }}
   - Kafka (Event streaming for log buffering)
 {{- end }}
@@ -34,6 +40,24 @@ kubectl wait --for=condition=ready pod -l app=ingester -n {{ .Values.namespace }
 {{- end }}
 {{- if .Values.appender.enabled }}
 kubectl wait --for=condition=ready pod -l app=appender -n {{ .Values.namespace }} --timeout=120s
+{{- end }}
+{{- if .Values.query.enabled }}
+kubectl wait --for=condition=ready pod -l app=query -n {{ .Values.namespace }} --timeout=180s
+{{- end }}
+{{- if .Values.ui.enabled }}
+kubectl wait --for=condition=ready pod -l app=ui -n {{ .Values.namespace }} --timeout=120s
+
+-----------------------------------------------------------------------
+ACCESS THE UI
+-----------------------------------------------------------------------
+
+  kubectl port-forward -n {{ .Values.namespace }} svc/ui 8080:{{ .Values.ui.service.port }}
+
+Then open http://localhost:8080
+  - Search: time range, filters on service/severity/pod/..., grep or regex
+  - Generate logs: synthetic logs for chosen services and pods over a time
+    range, sent to the ingester. They are searchable after the appender's
+    next commit (appender.buffer.timeSeconds = {{ .Values.appender.buffer.timeSeconds }}s).
 {{- end }}
 
 -----------------------------------------------------------------------

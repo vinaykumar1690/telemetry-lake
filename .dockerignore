@@ -30,3 +30,7 @@ docker/
 # Temporary files
 *.log
 *.tmp
+
+# UI build output and dependencies (the image installs its own)
+ui/node_modules/
+ui/dist/

@@ -1,0 +1,67 @@
+{{- if .Values.ui.enabled }}
+# Web UI (log search + log generator). nginx serves the static app and
+# proxies /api/query/ to the query service and /api/ingest/ to the ingester,
+# so one port-forward to this Service is all a laptop needs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ui
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      app: ui
+  template:
+    metadata:
+      labels:
+        app: ui
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: ui
+          image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"
+          imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          env:
+            # Fully qualified: nginx resolves them per request, without search domains
+            - name: QUERY_UPSTREAM
+              value: {{ .Values.ui.queryUpstream | default (printf "http://query.%s.svc.cluster.local:%v" .Values.namespace .Values.query.service.port) | quote }}
+            - name: INGEST_UPSTREAM
+              value: {{ .Values.ui.ingestUpstream | default (printf "http://ingester.%s.svc.cluster.local:%v" .Values.namespace .Values.ingester.service.port) | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ui
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.ui.service.type }}
+  ports:
+    - port: {{ .Values.ui.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: ui
+{{- end }}

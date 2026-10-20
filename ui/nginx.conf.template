@@ -1,0 +1,51 @@
+# Rendered by the nginx image's envsubst (/etc/nginx/templates) into conf.d.
+# QUERY_UPSTREAM and INGEST_UPSTREAM are set by the Helm chart (fully
+# qualified: names in variables bypass resolv.conf search domains).
+# Upstreams are resolved per request, not at startup, so the UI starts (and
+# answers 502 on that route) while a backend is missing or down.
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok";
+    }
+
+    # Query service: /api/query/v1/search -> ${QUERY_UPSTREAM}/v1/search
+    location /api/query/ {
+        set $query_upstream ${QUERY_UPSTREAM};
+        rewrite ^/api/query/(.*)$ /$1 break;
+        proxy_pass $query_upstream;
+        proxy_http_version 1.1;
+        proxy_read_timeout 120s;
+        # /v1/sql streams NDJSON
+        proxy_buffering off;
+        client_max_body_size 1m;
+    }
+
+    # Ingester: /api/ingest/v1/logs -> ${INGEST_UPSTREAM}/v1/logs
+    location /api/ingest/ {
+        set $ingest_upstream ${INGEST_UPSTREAM};
+        rewrite ^/api/ingest/(.*)$ /$1 break;
+        proxy_pass $ingest_upstream;
+        proxy_http_version 1.1;
+        proxy_read_timeout 60s;
+        # The ingester's default maxBodyBytes
+        client_max_body_size 16m;
+    }
+
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location / {
+        try_files $uri /index.html;
+        add_header Cache-Control "no-cache";
+    }
+}

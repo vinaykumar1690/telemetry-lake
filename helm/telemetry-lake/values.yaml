@@ -233,6 +233,31 @@ query:
       memory: "2Gi"
       cpu: "2000m"
 
+# Web UI: log search over the query service and a synthetic log generator
+# that posts to the ingester. Reach it with
+#   kubectl port-forward -n <namespace> svc/ui 8080:80
+ui:
+  enabled: true
+  image:
+    repository: telemetry-lake/ui
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 80
+  # Override to point at services outside this release
+  # (fully qualified host names; nginx does not apply DNS search domains)
+  queryUpstream: ""   # Defaults to http://query.<namespace>.svc.cluster.local:<query.service.port>
+  ingestUpstream: ""  # Defaults to http://ingester.<namespace>.svc.cluster.local:<ingester.service.port>
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "500m"
+
 # Iceberg table maintenance (compaction/compact.py, Spark)
 compaction:
   enabled: true
