@@ -16,8 +16,8 @@ use datafusion::catalog::TableProvider;
 use iceberg::table::Table;
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
-use iceberg_datafusion::IcebergStaticTableProvider;
 use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
+use logscan::LogsTableProvider;
 use planner::SearchPlanner;
 use tokio::sync::{Mutex, RwLock};
 
@@ -117,9 +117,8 @@ impl IcebergSource {
             self.failures.fetch_add(1, Ordering::Relaxed);
             SourceError::Unavailable(e.to_string())
         })?;
-        let provider = IcebergStaticTableProvider::try_new_from_table(table.clone())
-            .await
-            .map_err(|e| SourceError::Schema(e.to_string()))?;
+        let provider =
+            LogsTableProvider::try_new(table.clone(), None).map_err(|e| SourceError::Schema(e.to_string()))?;
         let planner = SearchPlanner::new(&provider.schema()).map_err(|e| SourceError::Schema(e.to_string()))?;
         let snapshot_id = table.metadata().current_snapshot_id();
         Ok(Loaded {
@@ -179,8 +178,7 @@ impl TableSource for IcebergSource {
             tracing::debug!(snapshot = id, "cursor snapshot no longer in table metadata; using the current one");
             return Ok(loaded.current.clone());
         }
-        let provider = IcebergStaticTableProvider::try_new_from_table_snapshot(loaded.table.clone(), id)
-            .await
+        let provider = LogsTableProvider::try_new(loaded.table.clone(), Some(id))
             .map_err(|e| SourceError::Schema(e.to_string()))?;
         // An older snapshot can have an older schema
         let planner = SearchPlanner::new(&provider.schema()).map_err(|e| SourceError::Schema(e.to_string()))?;

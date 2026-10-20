@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/logquery", "crates/planner", "crates/query-server"]
+members = ["crates/logquery", "crates/planner", "crates/logscan", "crates/query-server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 logquery = { path = "crates/logquery" }
 planner = { path = "crates/planner" }
+logscan = { path = "crates/logscan" }
 
 # DataFusion 55 / Arrow 59 (datafusion-distributed 4.x needs them). No
 # released iceberg crate supports them yet (Oct 2026), so these are pinned
@@ -18,6 +19,7 @@ planner = { path = "crates/planner" }
 # whose main uses iceberg-rust 5b82ab99. Switch to releases when they ship;
 # upgrade all of these together.
 datafusion = "55"
+datafusion-proto = "55"
 arrow-json = "59"
 iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3" }
 iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3" }

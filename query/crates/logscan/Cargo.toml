@@ -1,0 +1,29 @@
+[package]
+name = "logscan"
+description = "Partitioned, serializable Iceberg scan for the logs table (local and distributed execution)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Exposes fixtures::iceberg_logs_table() to other crates' tests
+test-fixtures = ["dep:planner", "planner/test-fixtures"]
+
+[dependencies]
+async-trait.workspace = true
+datafusion.workspace = true
+datafusion-proto.workspace = true
+futures.workspace = true
+iceberg.workspace = true
+iceberg-datafusion.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+arrow-schema = { version = "59", features = ["serde"] }
+planner = { workspace = true, optional = true }
+
+[dev-dependencies]
+logscan = { path = ".", features = ["test-fixtures"] }
+logquery.workspace = true
+planner = { workspace = true, features = ["test-fixtures"] }
+tokio.workspace = true
