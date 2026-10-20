@@ -3,8 +3,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use query_server::api::{AppState, router};
-use query_server::config::Config;
+use axum::Router;
+use axum::routing::get;
+use datafusion_distributed::Worker;
+use query_server::api::{AppState, Distributed, router};
+use query_server::config::{Config, Role};
+use query_server::distributed::{LogsWorkerSession, ScanPolicy, Workers};
 use query_server::source::IcebergSource;
 use tracing_subscriber::EnvFilter;
 
@@ -16,13 +20,18 @@ async fn main() -> ExitCode {
         .with_ansi(std::io::stdout().is_terminal())
         .init();
 
-    let config = match Config::from_env() {
+    // `otel-query --worker`: a distributed execution worker (no HTTP API)
+    let role = if std::env::args().any(|a| a == "--worker") { Role::Worker } else { Role::Coordinator };
+    let config = match Config::from_env(role) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("Configuration error: {error}");
             return ExitCode::from(1);
         }
     };
+    if role == Role::Worker {
+        return run_worker(config).await;
+    }
     let source = match IcebergSource::new(&config).await {
         Ok(source) => Arc::new(source),
         Err(error) => {
@@ -58,7 +67,24 @@ async fn main() -> ExitCode {
     });
 
     let port = config.http_port;
-    let app = router(AppState::new(config, source, runtime));
+    let mut state = AppState::new(config.clone(), source, runtime);
+    if let Some(spec) = &config.workers {
+        match Workers::parse(spec) {
+            Ok(workers) => {
+                tracing::info!(workers = %spec, min_bytes = config.distribute_min_bytes, "distributed execution enabled");
+                state = state.with_distributed(Distributed {
+                    workers: Arc::new(workers),
+                    file_io: config.file_io(),
+                    policy: ScanPolicy::from_config(&config),
+                });
+            }
+            Err(error) => {
+                eprintln!("Configuration error: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let app = router(state);
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -88,4 +114,54 @@ async fn shutdown_signal() {
         _ = terminate.recv() => {}
     }
     tracing::info!("shutting down: finishing in-flight queries");
+}
+
+/// Serves distributed tasks on WORKER_PORT (gRPC) and /health, /ready and
+/// /metrics on HTTP_PORT. A worker reads files with its own S3 settings and
+/// never talks to the catalog.
+async fn run_worker(config: Config) -> ExitCode {
+    let runtime = match query_server::runtime(config.memory_limit_bytes) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Cannot create the query runtime: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let worker =
+        Worker::from_session_builder(LogsWorkerSession { file_io: config.file_io(), runtime: runtime.clone() })
+            .with_runtime_env(runtime);
+
+    let health = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/ready", get(|| async { "ready" }))
+        .route("/metrics", get(|| async { "query_worker_up 1\n" }));
+    let http_port = config.http_port;
+    match tokio::net::TcpListener::bind(("0.0.0.0", http_port)).await {
+        Ok(listener) => {
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, health).await;
+            });
+        }
+        Err(error) => {
+            eprintln!("Cannot listen on :{http_port}: {error}");
+            return ExitCode::from(1);
+        }
+    }
+
+    let address = std::net::SocketAddr::from(([0, 0, 0, 0], config.worker_port));
+    tracing::info!("query worker listening on :{} (gRPC), :{http_port} (/health /ready /metrics)", config.worker_port);
+    match tonic::transport::Server::builder()
+        .add_service(worker.into_worker_server())
+        .serve_with_shutdown(address, shutdown_signal())
+        .await
+    {
+        Ok(()) => {
+            tracing::info!("query worker stopped");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Worker server error: {error}");
+            ExitCode::from(2)
+        }
+    }
 }

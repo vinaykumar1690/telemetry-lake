@@ -12,11 +12,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::prelude::{SessionConfig, SessionContext};
+use iceberg::io::FileIO;
 use logquery::json::SearchRequest;
 use serde_json::json;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::Config;
+use crate::distributed::{ScanPolicy, Workers, coordinator_state};
 use crate::error::ApiError;
 use crate::metrics::{Kind, Metrics};
 use crate::output;
@@ -34,19 +36,44 @@ pub struct AppState {
     pub runtime: Arc<RuntimeEnv>,
     pub metrics: Arc<Metrics>,
     pub permits: Arc<Semaphore>,
+    pub distributed: Option<Distributed>,
+}
+
+/// Distributed execution settings (QUERY_WORKERS set)
+#[derive(Clone)]
+pub struct Distributed {
+    pub workers: Arc<Workers>,
+    /// For the scan codec (encoding only, on the coordinator)
+    pub file_io: FileIO,
+    pub policy: ScanPolicy,
 }
 
 impl AppState {
     pub fn new(config: Config, source: Arc<dyn TableSource>, runtime: Arc<RuntimeEnv>) -> Self {
         let permits = Arc::new(Semaphore::new(config.max_concurrent));
-        Self { config: Arc::new(config), source, runtime, metrics: Arc::default(), permits }
+        Self { config: Arc::new(config), source, runtime, metrics: Arc::default(), permits, distributed: None }
     }
 
-    /// A fresh session per query; the runtime (memory pool) is shared
+    pub fn with_distributed(mut self, distributed: Distributed) -> Self {
+        self.distributed = Some(distributed);
+        self
+    }
+
+    /// A fresh session per query; the runtime (memory pool) is shared. With
+    /// workers, large scans are distributed (small ones still run here).
     pub fn session(&self) -> SessionContext {
         let config =
             SessionConfig::new().with_target_partitions(self.config.target_partitions).with_information_schema(false);
-        SessionContext::new_with_config_rt(config, self.runtime.clone())
+        match &self.distributed {
+            Some(d) => SessionContext::from(coordinator_state(
+                config,
+                self.runtime.clone(),
+                d.workers.clone(),
+                d.file_io.clone(),
+                d.policy,
+            )),
+            None => SessionContext::new_with_config_rt(config, self.runtime.clone()),
+        }
     }
 
     /// Waits briefly for a query slot; the permit is held for the whole query
@@ -95,7 +122,10 @@ async fn ready(State(state): State<AppState>) -> Response {
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
-    let body = state.metrics.render(state.source.as_ref());
+    let mut body = state.metrics.render(state.source.as_ref());
+    if let Some(d) = &state.distributed {
+        body.push_str(&format!("query_workers_available {}\n", d.workers.count()));
+    }
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 

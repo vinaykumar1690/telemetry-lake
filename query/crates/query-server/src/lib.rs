@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod config;
+pub mod distributed;
 pub mod error;
 pub mod metrics;
 pub mod output;

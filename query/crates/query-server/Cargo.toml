@@ -30,8 +30,12 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tonic = { version = "0.14", features = ["transport"] }
+url = "2"
 datafusion-distributed = "4"
 
 [dev-dependencies]
+logscan = { workspace = true, features = ["test-fixtures"] }
 planner = { workspace = true, features = ["test-fixtures"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tower.workspace = true

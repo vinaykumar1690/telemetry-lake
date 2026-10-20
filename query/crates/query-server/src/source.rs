@@ -6,7 +6,6 @@
 //! instance between refreshes avoids re-reading them on every query.
 //! Pagination pins the snapshot of the first page.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -68,17 +67,8 @@ pub struct IcebergSource {
 
 impl IcebergSource {
     pub async fn new(config: &Config) -> Result<Self, SourceError> {
-        let mut props = HashMap::from([
-            ("uri".to_string(), config.catalog_uri.clone()),
-            ("s3.endpoint".to_string(), config.s3_endpoint.clone()),
-            ("s3.access-key-id".to_string(), config.s3_access_key.clone()),
-            ("s3.secret-access-key".to_string(), config.s3_secret_key.clone()),
-            ("s3.region".to_string(), config.s3_region.clone()),
-            ("s3.path-style-access".to_string(), config.s3_path_style.to_string()),
-            // Static keys only: never fall back to the environment or EC2 metadata
-            ("s3.disable-config-load".to_string(), "true".to_string()),
-            ("s3.disable-ec2-metadata".to_string(), "true".to_string()),
-        ]);
+        let mut props = config.storage_props();
+        props.insert("uri".to_string(), config.catalog_uri.clone());
         if let Some(warehouse) = &config.warehouse {
             props.insert("warehouse".to_string(), warehouse.clone());
         }
