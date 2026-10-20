@@ -115,7 +115,7 @@ MinIO provides S3-compatible object storage where Iceberg stores its data files 
 
 | Property | Value |
 |----------|-------|
-| Image | `minio/minio:latest` |
+| Image | `telemetry-lake/minio:latest`, built from source by [docker/minio/Dockerfile](../docker/minio/Dockerfile) (MinIO no longer publishes community images or binaries) |
 | Replicas | 1 |
 | S3 API Port | 9000 |
 | Console Port | 9001 |
@@ -261,7 +261,8 @@ kafka:
 
 # MinIO Configuration
 minio:
-  image: minio/minio:latest
+  image: telemetry-lake/minio:latest
+  imagePullPolicy: IfNotPresent
   accessKey: minioadmin
   secretKey: minioadmin
   bucket: telemetrylake

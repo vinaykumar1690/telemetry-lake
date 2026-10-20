@@ -34,7 +34,10 @@ kafka:
 
 # MinIO Configuration
 minio:
-  image: minio/minio:latest
+  # Built from source (docker/minio/Dockerfile): MinIO no longer publishes
+  # community images or binaries
+  image: telemetry-lake/minio:latest
+  imagePullPolicy: IfNotPresent
   accessKey: minioadmin
   secretKey: minioadmin
   bucket: telemetrylake

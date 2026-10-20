@@ -239,6 +239,7 @@ docker build -f docker/appender/Dockerfile -t telemetry-lake/appender:latest .
 docker build -f docker/query/Dockerfile -t telemetry-lake/query:latest .
 docker build -f docker/compaction/Dockerfile -t telemetry-lake/compaction:latest .
 docker build -f docker/ui/Dockerfile -t telemetry-lake/ui:latest .
+docker build -f docker/minio/Dockerfile -t telemetry-lake/minio:latest .   # MinIO publishes no community images any more
 ```
 
 Open the UI from your laptop with `kubectl port-forward -n telemetry-lake svc/ui 8080:80` and http://localhost:8080.
