@@ -228,7 +228,7 @@ Data files stay in the MinIO bucket; see [Cleaning up](docs/integration-testing.
 
 ### Kubernetes
 
-The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, the query service (with a CPU autoscaler), the compaction and Nessie GC CronJobs, Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
+The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, the query service and its distributed query workers (each with a CPU autoscaler), the compaction and Nessie GC CronJobs, Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
 
 ```bash
 docker build -f docker/ingester/Dockerfile -t telemetry-lake/ingester:latest .

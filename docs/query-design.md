@@ -18,7 +18,23 @@ Today the table is written as **one small file per Kafka-partition-day per commi
 
 ---
 
-## Status (2026-10-19)
+## Status (2026-10-20)
+
+**Phase 5 (distributed execution) is implemented**, together with the parts of phase 3 it depends on. See `query/README.md` (Distributed execution) and [integration-testing.md](integration-testing.md#distributed-query-execution-2026-10-20).
+- **DataFusion 55** with pinned git revisions of iceberg-rust and the new `apache/datafusion-iceberg` (no released crate supports DataFusion 55 yet). This also brings runtime row-group pruning.
+- **`logscan`** (phase 3's first step):
+  - Our own `LogsTableProvider` and `LogsScanExec` plan Iceberg file tasks and bin-pack them into partitions. The upstream scan read every file in one stream.
+  - `LogsScanCodec` serializes a scan as self-contained tasks, so workers need no catalog.
+  - A `FileFilter` hook is where phase 4's index will drop files.
+- **datafusion-distributed 4:**
+  - Below `QUERY_DISTRIBUTE_MIN_BYTES` a scan stays in the query service. Above it, one task per `QUERY_BYTES_PER_TASK`, capped at the worker count, each over a disjoint, balanced set of files.
+  - Workers are `otel-query --worker`, discovered through a headless Service's DNS (Helm `query-workers`, CPU HPA).
+- **Verified by:**
+  - an in-process cluster test (results equal local execution for every search shape, pagination, GROUP BY, small scans and no-worker fallback stay local)
+  - `DISTRIBUTED=1` runs of `query_it.py` and `compaction_it.py` (all searches match DuckDB with every scan distributed)
+  - a benchmark (`tests/bench/bench.py`)
+
+Still open in phases 3 and 4: regex literal extraction, newest-first file ordering with early termination, and the index itself.
 
 **Phase 1 (table layout) is implemented:**
 - The compaction job (`compaction/compact.py`, Spark 4.1.3 + Iceberg 1.11.0, Helm `compaction` CronJob) rewrites files older than an hour, sorted by `(service_name, severity_number, timestamp)`, with bloom filters.
@@ -36,9 +52,8 @@ Results are in [integration-testing.md](integration-testing.md#compaction-2026-1
 Where it differs from the plan below:
 - **Three crates, not eight.** `logquery` holds the IR, the JSON frontend and cursors; `planner` holds the field resolver, lowering and the search plan; `query-server` holds HTTP, the table source, SQL and metrics. The index and indexer crates come with phase 4.
 - **SQL** is HTTP (`POST /v1/sql`) with NDJSON or Arrow IPC output. Flight SQL is deferred. The search API returns one JSON document per page; pages are bounded by `limit`, so it is not streamed.
-- **DataFusion 53, not 55.** iceberg-datafusion 0.10 pins it. Runtime row-group pruning arrives when iceberg-rust upgrades.
-- **The scan is single-stream.** `IcebergTableScan` reports one output partition; iceberg-rust reads files concurrently inside it. Splitting the planned files across partitions belongs with the index-aware scan in phases 3 and 4.
-- **Elasticity** uses a CPU-based HPA with two warm replicas. KEDA and the worker pool come with phase 5. There is no scanned-bytes limit yet; the time-range cap, timeout, memory pool and concurrency limit bound a query.
+- **Initially DataFusion 53 with a single-stream scan.** Both have since been replaced (see the phase 5 status above).
+- **Elasticity** uses CPU-based HPAs with two warm replicas, for the query pods and the worker pool. KEDA (scaling on in-flight bytes) is still a follow-up. There is no scanned-bytes limit yet; the time-range cap, timeout, memory pool and concurrency limit bound a query.
 
 The integration test also found two appender bugs, both fixed:
 - **Pagination tiebreak.** Rows had no stable unique key. The appender now writes `_record_index`, the record's position within its Kafka message.

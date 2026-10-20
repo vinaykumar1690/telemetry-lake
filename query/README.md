@@ -7,7 +7,8 @@ Design: [docs/query-design.md](../docs/query-design.md).
 ```
 crates/logquery      query IR, JSON search frontend, time parsing, cursors (no engine dependency)
 crates/planner       field namespace, IR -> DataFusion expressions, search plan + pagination
-crates/query-server  HTTP API, Iceberg table source, SQL endpoint, metrics (binary: otel-query)
+crates/logscan       partitioned Iceberg scan (LogsTableProvider/LogsScanExec) and its codec for workers
+crates/query-server  HTTP API, Iceberg table source, SQL endpoint, distributed workers, metrics (binary: otel-query)
 ```
 
 ## Build and test
@@ -18,8 +19,10 @@ cargo build --release          # target/release/otel-query
 cargo test --workspace         # unit + HTTP tests over an in-memory table
 ```
 
-Needs Rust ≥ 1.95. iceberg-datafusion 0.10 pins DataFusion 53 and Arrow 58,
-so upgrade those three together. The live test is in
+Needs Rust ≥ 1.95. DataFusion 55 / Arrow 59 (required by datafusion-distributed 4)
+are not supported by any released iceberg crate yet, so `iceberg*` and
+`iceberg-datafusion` are pinned git revisions (see `Cargo.toml`); move to
+releases when they ship and upgrade them together. The live test is in
 [docs/integration-testing.md](../docs/integration-testing.md) (`tests/it/query_it.py`).
 
 ## Run
@@ -49,12 +52,44 @@ export S3_ACCESS_KEY=minioadmin S3_SECRET_KEY=minioadmin
 | `QUERY_MEMORY_LIMIT_MB` | `2048` | Shared DataFusion memory pool |
 | `QUERY_TARGET_PARTITIONS` | CPU count | DataFusion parallelism per query |
 | `TABLE_REFRESH_MS` | `5000` | Maximum age of the cached table metadata; new commits show up within this |
+| `QUERY_WORKERS` | (none: no distribution) | Worker URLs (`http://w1:50051,http://w2:50051`) or `dns:///query-workers.<ns>.svc:50051` (a headless Service, re-resolved every 5 s) |
+| `QUERY_DISTRIBUTE_MIN_BYTES` | `2147483648` | Scans planned to read less stay in this process |
+| `QUERY_BYTES_PER_TASK` | `1073741824` | Above that, one worker task per this many bytes (capped at the worker count) |
+| `WORKER_PORT` | `50051` | gRPC port in worker mode |
 | `RUST_LOG` | `info` | Log filter |
 
 Exit codes: 0 clean shutdown (SIGTERM/SIGINT finishes in-flight queries), 1
 configuration error, 2 server error. `/ready` is 503 until the table has
 loaded; loading retries with backoff, so the service can start before the
 catalog does.
+
+## Distributed execution
+
+`otel-query --worker` runs a worker: it executes plan fragments sent by query
+services over gRPC (`WORKER_PORT`) and serves `/health`, `/ready` and
+`/metrics` on `HTTP_PORT`. Workers need only the S3 settings: scans arrive
+as self-contained Iceberg file tasks (`logscan::LogsScanCodec`), so they never
+call the catalog.
+
+A query service with `QUERY_WORKERS` set plans as usual and then lets
+[datafusion-distributed](https://github.com/datafusion-contrib/datafusion-distributed)
+place the work:
+- A scan of the logs table that reads less than `QUERY_DISTRIBUTE_MIN_BYTES`
+  (after partition, file and index pruning) gets one task and **stays in the
+  query service**, with no network hop. Most searches are like this.
+- Larger scans get one task per `QUERY_BYTES_PER_TASK`, at most one per
+  worker. Each task reads a disjoint, size-balanced set of files.
+  - Search plans become scan and TopK on the workers, a network coalesce, and
+    a final merge on the query service, so ordering and cursors are
+    unchanged.
+  - SQL aggregations are split across workers with network shuffles.
+
+Plain `EXPLAIN` shows the plan before distribution; `EXPLAIN ANALYZE` shows
+what ran, as stages, tasks, `NetworkCoalesceExec` and per-task
+`LogsScanExec`s. If the resolver finds no workers (for example, a headless
+Service with no ready pods), every query runs in the query service. If
+workers are listed but unreachable, distributed queries fail with a 500;
+queries below the threshold are unaffected.
 
 ## `POST /v1/search`
 
@@ -161,7 +196,8 @@ Errors are `{"error": {"code": ..., "message": ...}}`:
 `query_requests_total{endpoint,outcome}`, `query_rows_returned_total`,
 `query_duration_seconds_sum`, `query_in_flight`, `query_rejected_total`,
 `query_table_ready`, `query_table_metadata_age_seconds`,
-`query_table_refresh_failures_total`.
+`query_table_refresh_failures_total`, and with workers
+`query_workers_available`.
 
 If the catalog becomes unreachable, the service keeps answering from the
 last loaded metadata and counts the failed refreshes.

@@ -48,7 +48,7 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 **Components:**
 - `otel_receiver` (src/main.cpp + src/ingester/): Crow HTTP server that accepts OTLP logs and produces to Kafka
 - `otel_appender` (src/appender/): `KafkaSource` (poll thread) → `PipelinePool` (decode/transform/stage) → `StagingRegistry` → `IcebergCommitter` → `DuckdbIcebergSink`; wired in `app.cpp`
-- `otel-query` (query/, Rust): `logquery` (IR, JSON frontend, cursors; no engine dependency) → `planner` (`FieldResolver` field namespace, IR → DataFusion exprs, paginated search) → `query-server` (axum API, `IcebergSource` table cache, read-only SQL). DataFusion 53 + iceberg-rust 0.10 (pinned together). Every frontend must lower to the IR and resolve fields through `FieldResolver`; this keeps adding LogQL a two-way door (docs/query-design.md §3)
+- `otel-query` (query/, Rust): `logquery` (IR, JSON frontend, cursors; no engine dependency) → `planner` (`FieldResolver` field namespace, IR → DataFusion exprs, paginated search) → `logscan` (`LogsTableProvider`/`LogsScanExec`: partitioned Iceberg scan, `LogsScanCodec` for workers) → `query-server` (axum API, `IcebergSource` table cache, read-only SQL, `distributed.rs`: datafusion-distributed handlers, `--worker` mode). DataFusion 55 with iceberg-rust and apache/datafusion-iceberg pinned by git revision (no release supports DF 55 yet); plain EXPLAIN hides distribution, use EXPLAIN ANALYZE. Every frontend must lower to the IR and resolve fields through `FieldResolver`; this keeps adding LogQL a two-way door (docs/query-design.md §3)
 - Libraries: `appender_core` (DuckDB-free, tested with fakes) and `appender_duckdb`
 
 ## Configuration

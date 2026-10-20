@@ -292,6 +292,55 @@ client → Kafka is not exactly-once.
   a graceful restart, and every run succeeded. The result was
   `PASS: 10000 rows, no duplicates, no loss; 5 DLQ messages`.
 
+### Distributed query execution (2026-10-20)
+
+`DISTRIBUTED=1` makes `query_it.py` and `compaction_it.py` start two local
+workers (`otel-query --worker`) and distribute *every* scan
+(`QUERY_DISTRIBUTE_MIN_BYTES=0`, `QUERY_BYTES_PER_TASK=1`):
+
+```bash
+(cd query && cargo build)
+DISTRIBUTED=1 QUERY_IT=1 tests/it/query_it.py
+DISTRIBUTED=1 COMPACTION_IT=1 tests/it/compaction_it.py
+```
+
+- **Both pass.** All 11 searches matched DuckDB with every scan on the
+  workers, including after compaction and with pagination across a
+  compaction. `query_it` also checks `EXPLAIN ANALYZE` for
+  `NetworkCoalesceExec` and `DistributedLeafExec`. Plain `EXPLAIN` shows the
+  plan before distribution.
+- **The first run found a balancing bug.** With fewer files than groups,
+  one task got every file (`t0: files=2`, `t1: files=0`). Fixed and covered
+  by a test.
+
+**Benchmark** (`tests/bench/bench.py`). Spark loads 20 M synthetic rows over
+7 days (8 files, 551 MiB). Each figure is the p50 of 5 runs, in ms, on one
+16-core laptop, so the workers share the coordinator's CPUs and disk:
+
+```bash
+python3 tests/bench/bench.py load --rows 20000000 --days 7
+python3 tests/bench/bench.py run --workers 0,1,2,4
+```
+
+| Query | local | 1 worker | 2 workers | 4 workers |
+|-------|------:|---------:|----------:|----------:|
+| newest 100 in the last hour | 117 | 111 | 110 | 121 |
+| grep over a day (newest 100) | 1880 | 1871 | 1788 | 1795 |
+| map tag over a week (newest 100) | 5092 | 5147 | 4914 | 4281 |
+| count by service over a week (SQL) | 187 | 184 | 164 | 160 |
+
+`EXPLAIN ANALYZE` confirmed that a week-long query ran as 2 tasks of 4 files
+each (323 MB and 255 MB).
+
+What this does and does not show:
+- Distribution adds no measurable latency at these sizes (the network hop is
+  a few ms).
+- Speedups are small because one machine's cores are shared. On separate
+  nodes the scan work, which dominates the map-tag and grep queries, would
+  divide across machines.
+- The 5-second map-tag query is decode cost: every row's map is read. That
+  is what phase 4's per-file `key=value` index and promoted columns address.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
