@@ -212,7 +212,7 @@ def main():
 
         status, raw = q.http("POST", f"{query_url}/v1/sql", {"sql": "EXPLAIN SELECT body FROM logs "
                                                                      "WHERE k8s_pod_name = 'pod-1'"})
-        check(status == 200 and b"k8s_pod_name = " in raw and b"IcebergTableScan" in raw,
+        check(status == 200 and q.scan_has_predicate(raw, "k8s_pod_name ="),
               "promoted column filter reaches the Iceberg scan")
         print("== query_it searches after compaction")
         if q.run_cases(query_url, lake):

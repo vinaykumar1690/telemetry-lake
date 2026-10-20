@@ -12,13 +12,17 @@ license = "Apache-2.0"
 logquery = { path = "crates/logquery" }
 planner = { path = "crates/planner" }
 
-# iceberg-datafusion 0.10 pins DataFusion 53 / Arrow 58; upgrade them together
-datafusion = "53.1"
-arrow-json = "58"
-iceberg = "0.10.1"
-iceberg-catalog-rest = "0.10.1"
-iceberg-datafusion = "0.10.1"
-iceberg-storage-opendal = "0.10.1"
+# DataFusion 55 / Arrow 59 (datafusion-distributed 4.x needs them). No
+# released iceberg crate supports them yet (Oct 2026), so these are pinned
+# git revisions: the DataFusion integration moved to apache/datafusion-iceberg,
+# whose main uses iceberg-rust 5b82ab99. Switch to releases when they ship;
+# upgrade all of these together.
+datafusion = "55"
+arrow-json = "59"
+iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3" }
+iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3" }
+iceberg-storage-opendal = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3" }
+iceberg-datafusion = { git = "https://github.com/apache/datafusion-iceberg", rev = "b641e5ebe9e92967499ae7e440ba10d7797712df" }
 
 async-trait = "0.1"
 axum = "0.8"

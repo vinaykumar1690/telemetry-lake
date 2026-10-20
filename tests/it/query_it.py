@@ -170,6 +170,20 @@ CASES = [
 ]
 
 
+def scan_has_predicate(explain, condition):
+    """True if an EXPLAIN response shows `condition` in the Iceberg scan's predicate"""
+    scans = ("IcebergTableScan", "format=iceberg", "LogsScanExec")
+    for row in explain.decode(errors="replace").splitlines():  # NDJSON: {"plan_type": ..., "plan": ...}
+        try:
+            plan = json.loads(row).get("plan", "")
+        except ValueError:
+            continue
+        for line in plan.splitlines():
+            if any(s in line for s in scans) and "predicate" in line and condition in line:
+                return True
+    return False
+
+
 def run_cases(query_url, lake, window=WINDOW):
     """Runs every search in CASES (all pages) and compares with DuckDB; returns the failure count"""
     failures = 0
@@ -266,8 +280,8 @@ def main():
         failures += sql_count != total
         explain = "EXPLAIN SELECT body FROM logs WHERE \"timestamp\" >= now() - INTERVAL '10 minutes'"
         status, raw = http("POST", f"{query_url}/v1/sql", {"sql": explain})
-        pushed = status == 200 and b"IcebergTableScan" in raw and b"predicate:[timestamp >=" in raw
-        print(f"   {'ok ' if pushed else 'FAIL'} time filter pushed into IcebergTableScan")
+        pushed = status == 200 and scan_has_predicate(raw, "timestamp >=")
+        print(f"   {'ok ' if pushed else 'FAIL'} time filter pushed into the Iceberg scan")
         failures += not pushed
 
         status, raw = http("GET", f"{query_url}/metrics")
