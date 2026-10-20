@@ -143,9 +143,7 @@ def main():
         files_before = data_files(namespace)
         print(f"   {total} rows in {files_before} data files, {offsets_rows_before} offsets rows")
 
-        start("query", [str(query_bin)], HTTP_PORT="18091", TABLE_REFRESH_MS="1000")
-        query_url = "http://localhost:18091"
-        q.wait_for("query service", lambda: q.http("GET", f"{query_url}/ready")[0] == 200, timeout=60)
+        query_url = q.start_query_service(start, query_bin, 18091, worker_ports=(50071, 50072))
         status, raw = q.http("POST", f"{query_url}/v1/search", dict(q.WINDOW, limit=700))
         first_page = json.loads(raw)
         cursor = first_page["next_cursor"]

@@ -121,6 +121,13 @@ async fn files_are_split_into_disjoint_partitions() {
     let mut expected = all.clone();
     expected.sort();
     assert_eq!(seen, expected);
+    // Balanced when files are few: 2 files, 2 partitions, 2 tasks -> 1 file each
+    // (filling groups in order would give one task both files)
+    let two_files: Vec<_> = exec.tasks().take(2).cloned().collect();
+    let small =
+        LogsScanExec::new(exec.file_io().clone(), logscan::exec::bin_pack(two_files, 2), exec.schema(), None, None);
+    let halves = small.split(2);
+    assert_eq!(halves.iter().map(|v| v.tasks().count()).collect::<Vec<_>>(), vec![1, 1]);
     let mut rows = 0;
     for v in variants {
         rows += collect(Arc::new(v), Arc::new(TaskContext::default()))

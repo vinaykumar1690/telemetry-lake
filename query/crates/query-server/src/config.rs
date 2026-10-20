@@ -123,7 +123,7 @@ impl Config {
             target_partitions: integer("QUERY_TARGET_PARTITIONS", cpus, 1, 1024)? as usize,
             workers: get("QUERY_WORKERS"),
             distribute_min_bytes: integer("QUERY_DISTRIBUTE_MIN_BYTES", 2 << 30, 0, u64::MAX)?,
-            bytes_per_task: integer("QUERY_BYTES_PER_TASK", 1 << 30, 1 << 20, u64::MAX)?,
+            bytes_per_task: integer("QUERY_BYTES_PER_TASK", 1 << 30, 1, u64::MAX)?,
             worker_port: integer("WORKER_PORT", 50051, 1, 65535)? as u16,
         })
     }
@@ -191,7 +191,7 @@ mod tests {
             ("S3_URL_STYLE", "virtual"),
             ("QUERY_DEFAULT_LIMIT", "5000"),
             ("TABLE_REFRESH_MS", "1"),
-            ("QUERY_BYTES_PER_TASK", "1000"),
+            ("QUERY_BYTES_PER_TASK", "0"),
             ("WORKER_PORT", "70000"),
         ] {
             assert!(config(&[extra]).is_err(), "{extra:?}");

@@ -184,6 +184,27 @@ def scan_has_predicate(explain, condition):
     return False
 
 
+DISTRIBUTED = os.environ.get("DISTRIBUTED") == "1"
+
+
+def start_query_service(start, query_bin, port, worker_ports=(50061, 50062)):
+    """Starts otel-query on `port`. With DISTRIBUTED=1, also two local workers
+    and settings that distribute every scan (min bytes 0, one byte per task),
+    so the tests exercise the distributed path on small data."""
+    extra = {}
+    if DISTRIBUTED:
+        for i, grpc in enumerate(worker_ports):
+            health = port + 10 + i
+            start(f"worker{i}", [str(query_bin), "--worker"], WORKER_PORT=str(grpc), HTTP_PORT=str(health))
+            wait_for(f"worker {i}", lambda h=health: http("GET", f"http://localhost:{h}/ready")[0] == 200, timeout=60)
+        extra = {"QUERY_WORKERS": ",".join(f"http://127.0.0.1:{p}" for p in worker_ports),
+                 "QUERY_DISTRIBUTE_MIN_BYTES": "0", "QUERY_BYTES_PER_TASK": "1"}
+    start("query", [str(query_bin)], HTTP_PORT=str(port), TABLE_REFRESH_MS="1000", **extra)
+    url = f"http://localhost:{port}"
+    wait_for("query service", lambda: http("GET", f"{url}/ready")[0] == 200, timeout=60)
+    return url
+
+
 def run_cases(query_url, lake, window=WINDOW):
     """Runs every search in CASES (all pages) and compares with DuckDB; returns the failure count"""
     failures = 0
@@ -247,9 +268,8 @@ def main():
             return lake.scalar() == total
         wait_for("all rows in Iceberg", landed, timeout=180, interval=3)
 
-        start("query", [str(query_bin)], HTTP_PORT="18090", TABLE_REFRESH_MS="1000", RUST_LOG="info")
-        query_url = "http://localhost:18090"
-        wait_for("query service", lambda: http("GET", f"{query_url}/ready")[0] == 200, timeout=60)
+        query_url = start_query_service(start, query_bin, 18090)
+        print(f"== query service {'with 2 workers (every scan distributed)' if DISTRIBUTED else 'single node'}")
 
         window = WINDOW
         failures = run_cases(query_url, lake)
@@ -283,6 +303,13 @@ def main():
         pushed = status == 200 and scan_has_predicate(raw, "timestamp >=")
         print(f"   {'ok ' if pushed else 'FAIL'} time filter pushed into the Iceberg scan")
         failures += not pushed
+        if DISTRIBUTED:
+            # Plain EXPLAIN shows the plan before distribution; ANALYZE shows what ran
+            analyze = "EXPLAIN ANALYZE SELECT body FROM logs ORDER BY \"timestamp\" DESC LIMIT 5"
+            status, raw = http("POST", f"{query_url}/v1/sql", {"sql": analyze})
+            network = status == 200 and b"NetworkCoalesceExec" in raw and b"DistributedLeafExec" in raw
+            print(f"   {'ok ' if network else 'FAIL'} scan runs on the workers (NetworkCoalesceExec in the plan)")
+            failures += not network
 
         status, raw = http("GET", f"{query_url}/metrics")
         served = [line for line in raw.decode().splitlines() if 'outcome="ok"' in line]

@@ -83,10 +83,16 @@ impl LogsScanExec {
         let count = count.max(1);
         let partitions = self.groups.len();
         let tasks: Vec<FileScanTask> = self.tasks().cloned().collect();
-        let mut packed = bin_pack(tasks, partitions * count).into_iter();
-        (0..count)
-            .map(|_| {
-                let groups: Vec<_> = packed.by_ref().take(partitions).collect();
+        // Deal the packed groups out round-robin: bin_pack fills groups in
+        // order, so consecutive groups would give the first variants all the
+        // files when there are fewer files than groups
+        let mut variants: Vec<Vec<Vec<FileScanTask>>> = (0..count).map(|_| Vec::with_capacity(partitions)).collect();
+        for (i, group) in bin_pack(tasks, partitions * count).into_iter().enumerate() {
+            variants[i % count].push(group);
+        }
+        variants
+            .into_iter()
+            .map(|groups| {
                 LogsScanExec::new(
                     self.file_io.clone(),
                     groups,
