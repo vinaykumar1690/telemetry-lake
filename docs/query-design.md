@@ -20,15 +20,10 @@ Today the table is written as **one small file per Kafka-partition-day per commi
 
 ## Status (2026-10-20)
 
-**Phase 5 (distributed execution) is implemented**, together with the parts of phase 3 it depends on. See `query/README.md` (Distributed execution) and [integration-testing.md](integration-testing.md#distributed-query-execution-2026-10-20).
-- **DataFusion 55** with pinned git revisions of iceberg-rust and the new `apache/datafusion-iceberg` (no released crate supports DataFusion 55 yet). This also brings runtime row-group pruning.
-- **`logscan`** (phase 3's first step):
-  - Our own `LogsTableProvider` and `LogsScanExec` plan Iceberg file tasks and bin-pack them into partitions. The upstream scan read every file in one stream.
-  - `LogsScanCodec` serializes a scan as self-contained tasks, so workers need no catalog.
-  - A `FileFilter` hook is where phase 4's index will drop files.
-- **datafusion-distributed 4:**
-  - Below `QUERY_DISTRIBUTE_MIN_BYTES` a scan stays in the query service. Above it, one task per `QUERY_BYTES_PER_TASK`, capped at the worker count, each over a disjoint, balanced set of files.
-  - Workers are `otel-query --worker`, discovered through a headless Service's DNS (Helm `query-workers`, CPU HPA).
+**Phase 5 (distributed execution) is implemented**, together with the parts of phase 3 it depends on. §11 describes the result: the libraries, why DataFusion 55, what our scan and datafusion-distributed each do, and a query's full path. Operating details are in `query/README.md` (Distributed execution); results are in [integration-testing.md](integration-testing.md#distributed-query-execution-2026-10-20).
+- **DataFusion 55**, with iceberg-rust and `apache/datafusion-iceberg` pinned by git revision ([§11.2](#112-dependency-versions-why-datafusion-55)).
+- **`logscan`**, our own partitioned, serializable Iceberg scan, with a `FileFilter` hook for phase 4's index ([§11.3](#113-logscan-and-datafusion-distributed)).
+- **datafusion-distributed 4** with the placement policy of §6: workers are `otel-query --worker`, discovered through a headless Service's DNS (Helm `query-workers`, CPU HPA).
 - **Verified by:**
   - an in-process cluster test (results equal local execution for every search shape, pagination, GROUP BY, small scans and no-worker fallback stay local)
   - `DISTRIBUTED=1` runs of `query_it.py` and `compaction_it.py` (all searches match DuckDB with every scan distributed)
@@ -71,7 +66,7 @@ The integration test also found two appender bugs, both fixed:
 
 Why DataFusion:
 - The engine is a library, so the query service *is* the engine. Indexes become code paths (a custom scan that asks an index before reading files) rather than plugins negotiating through an SPI.
-- Forking means pinning `iceberg-datafusion` (a small crate) instead of maintaining a fork of a whole engine.
+- Forking means pinning `iceberg-datafusion` (a small crate) instead of maintaining a fork of a whole engine. In the end we replaced its scan with our own and kept only its filter translation ([§11.3](#113-logscan-and-datafusion-distributed)).
 - DataFusion 50+ already has **TopK dynamic filters** and, in 55 (Aug 2026), **runtime row-group pruning**. "Newest N matches" is the dominant log query, and those features are exactly what it needs.
 
 ---
@@ -157,24 +152,22 @@ LogQL is then a parser crate plus a lowering function, and nothing below the IR 
 
 Iceberg table-level `statistics` files are not used here, because Iceberg allows only one statistics file per snapshot, so the index would have to be rewritten on every commit. Once the Iceberg secondary-index proposal (Phase 1: Bloom skipping indexes in Puffin, discussed on dev@ in Jan 2026) lands, the registry moves to that metadata.
 
-**Query side.** `IndexedIcebergTableProvider` wraps `iceberg-datafusion`'s `IcebergTableProvider`:
-1. It plans files through iceberg-rust.
-2. It fetches the index blobs for the candidate files (with an LRU cache on local disk).
-3. It drops files that cannot match.
-4. It hands the rest to the Parquet scan.
+**Query side.** The index plugs into our scan (`logscan::LogsTableProvider`, §11.3) as a `FileFilter`, applied after iceberg-rust has planned the files and before they are split into partitions:
+1. It fetches the index blobs for the candidate files (with an LRU cache on local disk).
+2. It drops files that cannot match.
+3. The rest are read as usual, locally or on workers.
 
-Unindexed files, the recent ones not yet compacted, are always scanned. **Indexes are advisory**, so correctness never depends on them.
-
-**Fork policy.** Depend on upstream crates. Fork `iceberg-datafusion` (vendored as a git dependency) only if its scan-task API can't take an external file filter. Today it plans `FileScanTask`s that we can filter before execution.
+Unindexed files, the recent ones not yet compacted, are always scanned. **Indexes are advisory**, so correctness never depends on them. Because the scan is ours, no fork of `iceberg-datafusion` is needed for this.
 
 ---
 
 ## 6. Elasticity and small-query latency (answer to "does distributed hurt small queries?")
 No, provided two conditions hold:
 
-1. **Adaptive placement per query.** After pruning (§4 layers 1–3), the planner knows the candidate bytes.
-   - Below a threshold (for example 2 GB, or ≤ 64 files), the query runs **locally in the pod that received it**, with no network stages.
-   - Above it, `datafusion-distributed` splits the leaf scan across workers. Filter plus TopK plans need only a scatter and a gather (a `NetworkCoalesce`) with no shuffle, so they add one network hop (milliseconds). Datadog designed the project for this: "small queries shouldn't be penalized".
+1. **Adaptive placement per query** (implemented, defaults below; see §11.4 for where it happens in a query). After pruning (§4 layers 1–3), the planner knows the candidate bytes.
+   - Below `QUERY_DISTRIBUTE_MIN_BYTES` (2 GiB), the query runs **locally in the pod that received it**, with no network stages.
+   - Above it, one worker task per `QUERY_BYTES_PER_TASK` (1 GiB), capped at the worker count, each over a disjoint, size-balanced set of files.
+   - Filter plus TopK plans need only a scatter and a gather (a `NetworkCoalesce`) with no shuffle, so they add one network hop (milliseconds). Datadog designed the project for this: "small queries shouldn't be penalized".
 2. **No cold starts on the hot path.**
    - The frontend/coordinator pods have `minReplicas ≥ 2`.
    - The worker pool scales with **KEDA** on queue depth and in-flight scan bytes, keeps a warm minimum, and may scale to zero only off-hours.
@@ -258,9 +251,227 @@ A shared Foyer-style cache comes later.
   3. Run golden queries (time, column tag, map tag, grep, regex, newest-N with cursor). Compare results against DuckDB over the same table as an oracle.
 - **Performance:** EXPLAIN ANALYZE shows files and row groups pruned at each layer; p50/p99 latency for one-hour and one-day ranges; a check that small queries never take the distributed path.
 
+## 11. Architecture as built: libraries and the query path
+
+### 11.1 Layers
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ otel-query  (query/)                                                           │
+│   logquery    JSON request → query IR, cursors          (no engine dependency) │
+│   planner     field names → DataFusion expressions, search plan, pagination    │
+│   logscan     our Iceberg scan: plan files, split them, ship them to workers   │
+│   query-server  HTTP API, table cache, SQL endpoint, worker mode               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ datafusion-distributed   runs one DataFusion plan across many processes        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ iceberg-datafusion (apache/datafusion-iceberg)   glue between the two below    │
+├───────────────────────────────────────┬──────────────────────────────────────┤
+│ DataFusion   SQL parser, planner,     │ iceberg-rust   Iceberg spec in Rust:  │
+│ optimizer, execution engine           │ catalogs, metadata, file planning,    │
+│                                       │ Parquet reading, storage access       │
+├───────────────────────────────────────┴──────────────────────────────────────┤
+│ Apache Arrow (arrow-rs)   columnar in-memory format; RecordBatch everywhere   │
+│ parquet (arrow-rs)        Parquet reader and writer                           │
+│ OpenDAL                   S3 / GCS / Azure / local-file access                │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**DataFusion** is a query engine embedded as a library, not a server. It provides every stage of a query engine:
+
+| Stage | What it does |
+|---|---|
+| SQL parser (`sqlparser-rs`) | text to a syntax tree |
+| SQL to logical plan (`SqlToRel`) | resolves names and types into relational operators (scan, filter, sort, limit, projection, aggregate, join) |
+| Logical optimizer | rewrite rules, e.g. push filters and projections towards the scan |
+| Physical planner | executable operators (`FilterExec`, `SortExec`, `AggregateExec`, …), the number of parallel partitions, and asks each table for its scan operator |
+| Physical optimizer | e.g. Sort + Limit becomes a TopK; adds repartitioning for parallelism |
+| Execution | each operator produces async streams of Arrow `RecordBatch`es, one per partition, on Tokio threads |
+
+Data enters DataFusion through the `TableProvider` trait: "give me an operator that scans you, with these columns and filters". Everything above the scan is generic.
+
+**Apache Arrow** is the in-memory columnar format. A `RecordBatch` holds a few thousand rows stored column by column. DataFusion, iceberg-rust, the Parquet reader and our JSON output all exchange Arrow batches, which is why their versions must line up (§11.2).
+
+**iceberg-rust** (crate `iceberg`) is the Apache project's implementation of the Iceberg spec. It is not a query engine; it knows what an Iceberg table is and how to read or change one:
+- **Metadata model:** table metadata, schemas with field IDs, partition specs, snapshots, manifest lists, manifests, data and delete files.
+- **Catalog clients:** `iceberg-catalog-rest` speaks the REST protocol to Nessie (`loadTable`, `transactions/commit`, …). There are also memory, Glue and SQL catalogs.
+- **Storage (`FileIO`):** reads and writes `s3://` and `file://` paths through OpenDAL, configured with our endpoint and keys.
+- **Scan planning:** given a snapshot and a filter, it reads the manifest list and manifests. It prunes by partition value (`day(timestamp)`) and by per-file column min/max statistics, and returns `FileScanTask`s. A task is one file, or part of one, plus the columns to read, the bound predicate and any delete files.
+- **Arrow reader:** reads Parquet for those tasks. It matches columns by Iceberg field ID rather than by name, so added or renamed columns stay correct. It skips row groups using statistics and bloom filters, applies delete files, and outputs Arrow batches.
+- **Writers and transactions:** appends, rewrites and commits.
+
+It serves projects that need Iceberg without a JVM: Rust databases and streaming engines (for example RisingWave and Databend), the Lakekeeper catalog, PyIceberg's Rust-accelerated core, and the DataFusion integration. In this system only the query service uses it, for three jobs:
+1. talking to Nessie;
+2. planning which files to read;
+3. reading them.
+
+The appender writes through DuckDB's C++ Iceberg extension, and compaction uses Java Iceberg inside Spark.
+
+**iceberg-datafusion** is the glue that makes an Iceberg table look like a DataFusion table. It provides:
+- Iceberg `TableProvider`s and a scan operator;
+- `convert_filters_to_predicate`, which translates DataFusion expressions into iceberg-rust predicates that can prune files;
+- `INSERT INTO` support and metadata tables (`logs$snapshots`, …).
+
+It used to live in the iceberg-rust repository. In September 2026 both projects voted to move it into the DataFusion project as `apache/datafusion-iceberg`. The reason was release coupling: the glue must follow DataFusion's breaking major release every month or two, while iceberg-rust releases on its own schedule.
+
+We now use only part of it:
+- its filter translation;
+- an error-conversion helper;
+- its write path, but only to build test tables.
+
+Its scan was replaced by `logscan` (§11.3).
+
+### 11.2 Dependency versions: why DataFusion 55
+A Rust binary can link two major versions of a crate, but their types are unrelated. `ExecutionPlan` from DataFusion 53 is not the trait of the same name in 55, and a `RecordBatch` from Arrow 58 is not one from Arrow 59.
+
+datafusion-distributed wraps our scan operator, serializes it and runs it on workers. That only compiles if every library touching the plan and its batches was built against the same DataFusion and Arrow:
+- datafusion-distributed;
+- iceberg-datafusion;
+- iceberg-rust's Arrow reader;
+- our code.
+
+| Crate | DataFusion / Arrow |
+|---|---|
+| datafusion-distributed 4.0 (Aug 2026, current) | 55 / 59 |
+| datafusion-distributed 2.x–3.x | 54 / 58 |
+| datafusion-distributed 1.0 (Apr 2026) | 53 / 58 |
+| iceberg-datafusion 0.10.1 (newest on crates.io) | 53 / 58 |
+| iceberg-rust 0.10.1 (newest on crates.io) | Arrow 58 |
+| iceberg-rust main, datafusion-iceberg main | 55 / 59 |
+
+The current datafusion-distributed line, whose leaf-splitting handlers we use, needs DataFusion 55. DataFusion 55 means Arrow 59, and only the unreleased main branches of iceberg-rust and datafusion-iceberg are on Arrow 59. Staying on datafusion-distributed 1.0 with DataFusion 53 would have kept us on an outdated line and given up DataFusion 55's runtime row-group pruning.
+
+`query/Cargo.toml` therefore pins git revisions:
+- `apache/datafusion-iceberg` at `b641e5eb`;
+- iceberg-rust at `5b82ab99`, the commit datafusion-iceberg itself uses, so the two agree.
+
+`Cargo.lock` records them, which keeps builds (including the Docker image) reproducible. Our code compiled against DataFusion 55 unchanged.
+
+The cost is unreleased code. One upstream bug was hit: DataFusion `INSERT` into a *partitioned* Iceberg table with MAP columns fails. Reads are unaffected and production data is written by DuckDB, so only the test fixture works around it. Switch the pins to releases when both projects publish versions on DataFusion 55.
+
+### 11.3 logscan and datafusion-distributed
+They solve different halves of the problem.
+
+**`logscan` decides what to split and how to describe a piece.** This is specific to Iceberg and to our table. The upstream scan read every file in one stream, with nothing to split or serialize.
+- `LogsTableProvider` plans the files through iceberg-rust (partition and statistics pruning), applies the optional `FileFilter` (§5), and bin-packs the files by size into up to `target_partitions` partitions.
+- `LogsScanExec` reads each partition with iceberg-rust's Arrow reader. `split(n)` turns it into n disjoint scans with equal partition counts, one per worker task, dealing files round-robin so tasks stay balanced.
+- `LogsScanCodec` serializes a scan as its `FileScanTask`s. Each task carries the file path, byte range, columns, predicate and delete files, so a worker needs S3 access and never calls the catalog.
+
+**datafusion-distributed runs the pieces elsewhere and combines the results.** Our part is about 300 lines of handlers and codec; it supplies the distributed runtime:
+
+| What it does | Without it, we would write… |
+|---|---|
+| **Stage planning:** cuts the physical plan where data must move between machines and inserts network operators: `NetworkCoalesceExec` (many tasks to one), `NetworkShuffleExec` (repartition by key, for GROUP BY and joins), `NetworkBroadcastExec` | a distributed query planner |
+| **Task counts:** asks each leaf how many tasks it wants (our handler applies §6's policy), reconciles leaves in a stage, caps at the worker count | the scheduling policy |
+| **Routing:** assigns tasks to worker URLs from our resolver (the headless Service's DNS) | placement and discovery plumbing |
+| **Plan shipping:** serializes each stage with datafusion-proto plus our codec and sends it over gRPC | a protocol and plan serializer |
+| **Worker runtime:** a gRPC service that builds a session per task (ours adds the codec and the memory limit), executes it and streams Arrow batches back with Arrow Flight encoding; task-state cache and cancellation | the worker server |
+| **Pushing work down:** e.g. TopK runs on each worker before the network, so only the best N rows per task cross it; partial aggregation runs below shuffles | optimizer rules |
+| **Observability:** `EXPLAIN ANALYZE` across stages and tasks, with timings, bytes sent and network latency | distributed metrics |
+
+The same DataFusion plan runs locally or distributed, which is why queries below the threshold simply skip the distributed stage.
+
+### 11.4 A query, end to end
+
+**Processes:**
+
+```
+                         ┌───────────────────────────── query pod (coordinator) ──────────────────────────────┐
+ client ── HTTP :8090 ──▶│ axum ─▶ logquery ─▶ planner ─▶ DataFusion planning ─▶ execution ─▶ JSON response │
+                         │                         │            │                     ▲                          │
+                         │                         │      LogsTableProvider           │ Arrow batches            │
+                         │                         │            │                     │ (gRPC, Arrow Flight)      │
+                         └─────────────────────────┼────────────┼─────────────────────┼──────────────────────────┘
+                                                   │            │ iceberg-rust        │
+                              cached Table ◀───────┘            │ REST: loadTable     │  only for large scans
+                              (IcebergSource, ≤5 s old)          ▼                     │
+                                                          ┌──────────┐        ┌───────┴──────────────────┐
+                                                          │  Nessie  │        │ worker pods (--worker)    │
+                                                          └──────────┘        │ LogsScanExec + TopK       │
+                                                                              └───────┬──────────────────┘
+                                         manifests, Parquet (S3 range reads)          │
+                                  MinIO/S3 ◀──────────────────────────────────────────┘ (and from the coordinator
+                                                                                          when it runs locally)
+```
+
+**Steps of a search**, for example `{"start":"now-7d","filters":{"k8s.pod.name":"pod-7"},"grep":"Timeout","limit":100}`. The IR and field resolution (steps ③ and ⑤) are as described in §3, and the pruning layers in step ⑨ are those of §4.
+
+```
+ ① HTTP                axum handler (query-server/api.rs): concurrency limit (429), timeout
+ ② Parse & validate    logquery::json::SearchRequest: times resolved, limits, cursor decoded
+ ③ Query IR            LogQuery { time, filter: And[pod = "pod-7", body contains "Timeout"],
+                                  order: Desc, limit: 100 }
+ ④ Table               IcebergSource: cached iceberg-rust Table (reloaded from Nessie
+                       at most every 5 s), wrapped as logscan::LogsTableProvider
+ ⑤ Field resolution    planner::FieldResolver: column if promoted, else map lookup
+ ⑥ Expressions         planner::filters::lower → DataFusion Expr
+                       (+ the cursor's key condition on later pages)
+ ⑦ Logical plan        planner::SearchPlanner::frame:
+                         Projection ← Limit(101) ← Sort(row key DESC) ← Filter ← TableScan
+                       (101 = one extra row to know whether a next page exists)
+ ⑧ Logical optimizer   DataFusion: filter and projection pushed into the TableScan
+ ⑨ Physical planning   DataFusion calls LogsTableProvider::scan(columns, filters, limit):
+                         a. convert_filters_to_predicate        (iceberg-datafusion)
+                         b. table.scan()…plan_files()           (iceberg-rust: §4 layers 1–2)
+                         c. FileFilter, then bin_pack           (logscan)
+                         → LogsScanExec { groups of FileScanTasks }
+                       physical optimizer: Sort + Limit → TopK, FilterExec, repartitioning
+ ⑩ Distribute?         only with QUERY_WORKERS (datafusion-distributed): our handler applies
+                       §6's policy. Small: unchanged, runs here. Large: split the scan into
+                       disjoint tasks, cut the plan (workers: scan → filter → TopK;
+                       coordinator: NetworkCoalesceExec → merge → projection), encode the
+                       stages (datafusion-proto + LogsScanCodec), send them over gRPC
+ ⑪ Execution           LogsScanExec → iceberg-rust ArrowReader → FileIO (OpenDAL) → S3 range
+                       reads; row groups skipped by stats and bloom filters; columns by field
+                       id → FilterExec (exact, incl. LIKE) → TopK per partition →
+                       (NetworkCoalesceExec) → SortPreservingMergeExec → 101 rows
+ ⑫ Page & cursor       SearchPlanner::run: 100 rows; the 101st gives next_cursor
+ ⑬ Response            arrow-json → {"rows", "next_cursor", "snapshot_id", "stats"}
+```
+
+**A distributed plan** (`EXPLAIN ANALYZE` from the benchmark: a week of data on two workers; plain `EXPLAIN` shows the plan before distribution):
+
+```
+DistributedExec                                   ← coordinator: sends stages, gathers results
+  ProjectionExec
+    SortPreservingMergeExec [timestamp DESC], fetch=100
+      [Stage 1] => NetworkCoalesceExec: input_tasks=2     ← network boundary
+  ┌── Stage 1  tasks=2 ─────────────────────────────────── runs on the workers
+  │ SortExec: TopK(fetch=100)                   ← only 100 rows per task cross the network
+  │   FilterExec
+  │     DistributedLeafExec
+  │       t0: LogsScanExec files=4 bytes=323 MB
+  │       t1: LogsScanExec files=4 bytes=255 MB
+  └──────────────────────────────────────────────────────
+```
+
+Below the threshold, the same query has no `DistributedExec` and no stage, and runs entirely in the query pod.
+
+**SQL** joins the same path at step ⑦. sqlparser-rs and `SqlToRel` build the logical plan, with `logs` resolved to `LogsTableProvider`. Steps ⑧–⑪ follow; aggregations get `NetworkShuffleExec` when distributed. Results stream as NDJSON or Arrow IPC, with no paging. The IR and the field resolver are skipped, but pruning, partitioning and distribution all apply.
+
+**Which library does what:**
+
+| Step | Component | Library |
+|---|---|---|
+| HTTP, admission | `api.rs` | axum, tokio |
+| JSON → IR, cursors | `logquery` | serde |
+| Table metadata from Nessie | `IcebergSource` | iceberg-rust, iceberg-catalog-rest |
+| Field names, expressions, search plan | `planner` | DataFusion (Expr / DataFrame) |
+| SQL parsing | `sql.rs` | DataFusion (sqlparser-rs) |
+| Optimizers, physical planning, TopK | — | DataFusion |
+| Filter translation to Iceberg | `LogsTableProvider` | iceberg-datafusion |
+| File planning and pruning | `LogsTableProvider` | iceberg-rust |
+| Partitioning files, splitting for workers | `logscan` | ours |
+| Parquet reading, field-ID mapping | `LogsScanExec` | iceberg-rust → parquet → OpenDAL |
+| Stages, routing, gRPC, worker runtime | `distributed.rs` handlers | datafusion-distributed (tonic, Arrow Flight) |
+| Serializing the scan | `LogsScanCodec` | ours, on datafusion-proto |
+| Filter, TopK, merge, aggregation | — | DataFusion operators |
+| JSON output | `output.rs` | arrow-json |
+
 ## References
 - [Apache Iceberg Rust 0.8.0](https://iceberg.apache.org/blog/apache-iceberg-rust-0.8.0-release/), [0.9.0](https://iceberg.apache.org/blog/apache-iceberg-rust-0.9.0-release/), [0.10.0](https://iceberg.apache.org/blog/apache-iceberg-rust-0.10.0-release/) releases
 - [Apache DataFusion 55.0.0](https://datafusion.apache.org/blog/2026/08/25/datafusion-55.0.0): runtime row-group pruning
+- [Why the Iceberg DataFusion integration is moving to Apache DataFusion](https://datalakehousehub.com/blog/datafusion-iceberg-moves-to-apache-datafusion) / [apache/datafusion-iceberg](https://github.com/apache/datafusion-iceberg)
 - [Distributed DataFusion (Datadog)](https://www.datadoghq.com/blog/engineering/distributed-datafusion/) / [datafusion-contrib/datafusion-distributed](https://github.com/datafusion-contrib/datafusion-distributed)
 - [DataFusion Ballista 54.0.0](https://datafusion.apache.org/blog/2026/07/12/datafusion-ballista-54.0.0): the alternative distributed runtime
 - [Gluten 2026 roadmap](https://github.com/apache/gluten/issues/11827): Iceberg support for the Velox backend
