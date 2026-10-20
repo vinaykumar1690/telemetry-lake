@@ -61,6 +61,14 @@ spec:
               value: {{ .Values.query.memoryLimitMB | quote }}
             - name: TABLE_REFRESH_MS
               value: {{ .Values.query.tableRefreshMs | quote }}
+            {{- if .Values.query.workers.enabled }}
+            - name: QUERY_WORKERS
+              value: "dns:///query-workers.{{ .Values.namespace }}.svc.cluster.local:50051"
+            - name: QUERY_DISTRIBUTE_MIN_BYTES
+              value: {{ mul .Values.query.distributeMinGB 1073741824 | quote }}
+            - name: QUERY_BYTES_PER_TASK
+              value: {{ mul .Values.query.bytesPerTaskMB 1048576 | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8090

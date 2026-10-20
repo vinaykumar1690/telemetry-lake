@@ -200,6 +200,26 @@ query:
   maxConcurrent: 16      # concurrent queries per replica; more wait up to 2s, then 429
   memoryLimitMB: 1536    # DataFusion memory pool; keep under resources.limits.memory
   tableRefreshMs: 5000   # how stale the table metadata may be (new commits appear within this)
+  # Distributed execution: scans planned to read at least distributeMinGB are
+  # split across the workers, one task per bytesPerTaskMB
+  distributeMinGB: 2
+  bytesPerTaskMB: 1024
+  workers:
+    enabled: true
+    replicas: 2          # ignored while autoscaling is enabled
+    memoryLimitMB: 1536
+    autoscaling:
+      enabled: true
+      minReplicas: 2     # warm: a large query never waits for a worker to start
+      maxReplicas: 20
+      targetCPUUtilization: 70
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "1000m"
+      limits:
+        memory: "2Gi"
+        cpu: "4000m"
   autoscaling:
     enabled: true
     minReplicas: 2       # warm replicas: small queries never wait for a cold start

@@ -167,3 +167,28 @@ async fn small_scans_stay_on_the_coordinator() {
     let out = planner.run(&ctx, provider, &query(None, 100), None).await.unwrap();
     assert_eq!(out.rows, ROWS);
 }
+
+/// A headless Service with no ready pods resolves to nothing: queries must
+/// still run, locally
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_resolved_workers_runs_locally() {
+    struct NoWorkers;
+    impl datafusion_distributed::WorkerResolver for NoWorkers {
+        fn get_urls(&self) -> Result<Vec<url::Url>, datafusion::error::DataFusionError> {
+            Ok(Vec::new())
+        }
+    }
+    let table = fixture("none").await;
+    let provider: Arc<dyn TableProvider> = Arc::new(LogsTableProvider::try_new(table.clone(), None).unwrap());
+    let ctx = SessionContext::from(coordinator_state(
+        SessionConfig::new().with_target_partitions(4),
+        query_server::runtime(512 << 20).unwrap(),
+        Arc::new(NoWorkers),
+        table.file_io().clone(),
+        ALWAYS,
+    ));
+    let plan = plan_text(&ctx, Arc::clone(&provider), &query(None, 100)).await;
+    assert!(!plan.contains("Network"), "{plan}");
+    let planner = SearchPlanner::new(&provider.schema()).unwrap();
+    assert_eq!(planner.run(&ctx, provider, &query(None, 100), None).await.unwrap().rows, ROWS);
+}

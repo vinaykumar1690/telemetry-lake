@@ -1,0 +1,111 @@
+{{- if and .Values.query.enabled .Values.query.workers.enabled }}
+# Distributed query workers (otel-query --worker). The query Deployment
+# finds them through the headless Service's DNS and sends them the scans
+# of large queries; small queries never leave the query pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: query-workers
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: query-workers
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.query.workers.replicas }}
+  selector:
+    matchLabels:
+      app: query-workers
+  template:
+    metadata:
+      labels:
+        app: query-workers
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ add .Values.query.timeoutSeconds 10 }}
+      containers:
+        - name: worker
+          image: "{{ .Values.query.image.repository }}:{{ .Values.query.image.tag }}"
+          imagePullPolicy: {{ .Values.query.image.pullPolicy }}
+          args: ["--worker"]
+          env:
+            # Workers read data files directly: storage settings only, no catalog
+            - name: S3_ENDPOINT
+              value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appender.s3.accessKeySecret.name | default "s3-credentials" }}
+                  key: {{ .Values.appender.s3.accessKeySecret.key }}
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appender.s3.secretKeySecret.name | default "s3-credentials" }}
+                  key: {{ .Values.appender.s3.secretKeySecret.key }}
+            - name: WORKER_PORT
+              value: "50051"
+            - name: HTTP_PORT
+              value: "8090"
+            - name: QUERY_MEMORY_LIMIT_MB
+              value: {{ .Values.query.workers.memoryLimitMB | quote }}
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.query.workers.resources | nindent 12 }}
+---
+# Headless: DNS returns every ready worker's address
+apiVersion: v1
+kind: Service
+metadata:
+  name: query-workers
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: query-workers
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: 50051
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+  selector:
+    app: query-workers
+{{- if .Values.query.workers.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: query-workers
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: query-workers
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: query-workers
+  minReplicas: {{ .Values.query.workers.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.query.workers.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.query.workers.autoscaling.targetCPUUtilization }}
+{{- end }}
+{{- end }}

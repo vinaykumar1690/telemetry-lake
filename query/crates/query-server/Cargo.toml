@@ -38,4 +38,5 @@ datafusion-distributed = "4"
 logscan = { workspace = true, features = ["test-fixtures"] }
 planner = { workspace = true, features = ["test-fixtures"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+url = "2"
 tower.workspace = true
