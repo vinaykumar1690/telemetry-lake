@@ -37,6 +37,18 @@ FetchContent_Declare(
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
+# Prometheus metric types and text serialization; /metrics is served by Crow,
+# so only the core library is built
+FetchContent_Declare(
+  prometheus_cpp
+  GIT_REPOSITORY https://github.com/jupp0r/prometheus-cpp.git
+  GIT_TAG v1.3.0
+)
+set(ENABLE_PULL OFF CACHE BOOL "" FORCE)
+set(ENABLE_PUSH OFF CACHE BOOL "" FORCE)
+set(ENABLE_COMPRESSION OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(USE_THIRDPARTY_LIBRARIES OFF CACHE BOOL "" FORCE)
 
 # Find or fetch zlib for gzip decompression
 find_package(ZLIB QUIET)
@@ -136,7 +148,7 @@ FetchContent_Declare(
 )
 
 # Make dependencies available (librdkafka must be found before cppkafka)
-FetchContent_MakeAvailable(protobuf opentelemetry_proto cppkafka nlohmann_json)
+FetchContent_MakeAvailable(protobuf opentelemetry_proto cppkafka nlohmann_json prometheus_cpp)
 
 # Find pre-built DuckDB library
 # DuckDB binary distribution should be installed to /usr/local or specified via DUCKDB_ROOT
@@ -362,11 +374,48 @@ target_include_directories(otel_proto PUBLIC
   ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# Logging, Prometheus metrics and librdkafka statistics shared by both services.
+# The version label of build_info comes from git, or -DTELEMETRY_LAKE_VERSION
+# where there is no checkout (Docker builds)
+if(NOT TELEMETRY_LAKE_VERSION)
+  execute_process(
+    COMMAND git describe --tags --always --dirty
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE TELEMETRY_LAKE_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(NOT TELEMETRY_LAKE_VERSION)
+    set(TELEMETRY_LAKE_VERSION unknown)
+  endif()
+endif()
+message(STATUS "Telemetry Lake version: ${TELEMETRY_LAKE_VERSION}")
+
+add_library(observability STATIC
+  src/observability/kafka_stats.cpp
+  src/observability/log.cpp
+  src/observability/metrics.cpp
+)
+target_include_directories(observability PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(observability PUBLIC
+  prometheus-cpp::core nlohmann_json::nlohmann_json rdkafka::rdkafka)
+set_source_files_properties(src/observability/metrics.cpp PROPERTIES
+  COMPILE_DEFINITIONS "TELEMETRY_LAKE_VERSION=\"${TELEMETRY_LAKE_VERSION}\"")
+
+add_executable(observability_test
+  tests/observability/test_kafka_stats.cpp
+  tests/observability/test_log.cpp
+  tests/observability/test_metrics.cpp
+)
+target_link_libraries(observability_test PRIVATE observability GTest::gtest GTest::gtest_main)
+target_compile_definitions(observability_test PRIVATE
+  OBS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/observability/data")
+
 # Create executable
 add_executable(otel_receiver src/main.cpp src/ingester/http_server.cpp src/config.cpp src/ingester/queue_producer.cpp)
 
 # Link libraries
 target_link_libraries(otel_receiver PUBLIC
+  observability
   Crow::Crow
   protobuf::libprotobuf
   otel_proto
@@ -394,6 +443,7 @@ add_executable(http_server_test
 
 # Link libraries for test
 target_link_libraries(http_server_test PRIVATE
+  observability
   GTest::gtest
   GTest::gtest_main
   GTest::gmock
@@ -413,6 +463,7 @@ target_include_directories(http_server_test PRIVATE
 
 # Add test to CTest
 add_test(NAME HttpServerTest COMMAND http_server_test)
+add_test(NAME ObservabilityTest COMMAND observability_test)
 
 # Appender: DuckDB-independent core, unit-tested on its own
 add_library(appender_core STATIC
@@ -431,7 +482,7 @@ target_include_directories(appender_core PUBLIC
   ${protobuf_SOURCE_DIR}/src
 )
 target_link_libraries(appender_core PUBLIC
-  otel_proto protobuf::libprotobuf nlohmann_json::nlohmann_json rdkafka::rdkafka)
+  observability otel_proto protobuf::libprotobuf nlohmann_json::nlohmann_json rdkafka::rdkafka)
 
 add_executable(appender_core_test
   tests/appender/test_committer.cpp
