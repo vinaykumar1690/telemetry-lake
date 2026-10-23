@@ -62,7 +62,7 @@ public:
     // Appends rows decoded from Kafka messages up to max_offset; bytes is the
     // payload size accounted against the budget. All-or-nothing.
     Result<void> append(std::span<const LogRow> rows, std::int64_t max_offset,
-                        std::size_t bytes) override;
+                        std::size_t bytes, std::int64_t kafka_ts_ms = -1) override;
 
     // Advances the offset without rows (e.g. a message with no log records,
     // or a poison message already sent to the DLQ)
@@ -92,6 +92,8 @@ private:
     std::size_t bytes_ = 0;
     std::int64_t max_offset_ = -1;
     bool dirty_ = false;  // offset advanced since the last seal
+    std::int64_t min_kafka_ts_ms_ = -1;
+    std::int64_t max_kafka_ts_ms_ = -1;
     std::optional<std::chrono::steady_clock::time_point> first_append_;
 };
 

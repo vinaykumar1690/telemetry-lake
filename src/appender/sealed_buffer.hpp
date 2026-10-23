@@ -15,6 +15,10 @@ struct SealedBuffer {
     std::int64_t max_offset = -1;
     std::size_t rows = 0;
     std::size_t bytes = 0;
+    // Kafka message timestamps (ms since the epoch) of the staged messages;
+    // -1 when none had one
+    std::int64_t min_kafka_ts_ms = -1;
+    std::int64_t max_kafka_ts_ms = -1;
 };
 
 }  // namespace appender

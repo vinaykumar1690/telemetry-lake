@@ -1,6 +1,7 @@
 #ifndef APPENDER_KAFKA_SOURCE_HPP
 #define APPENDER_KAFKA_SOURCE_HPP
 
+#include "appender_metrics.hpp"
 #include "error.hpp"
 #include "flow_control.hpp"
 #include "iceberg_committer.hpp"
@@ -18,6 +19,10 @@
 #include <set>
 #include <string>
 
+namespace obs {
+class KafkaStatsCollector;
+}
+
 namespace appender {
 
 struct KafkaSourceOptions {
@@ -28,6 +33,9 @@ struct KafkaSourceOptions {
     std::chrono::seconds revoke_timeout{60};
     std::size_t batch_size = 500;
     std::chrono::milliseconds poll_timeout{100};
+    int stats_interval_ms = 0;  // librdkafka statistics; 0 disables them
+    std::shared_ptr<obs::KafkaStatsCollector> stats;
+    std::shared_ptr<AppenderMetrics> metrics;  // standalone when null
 };
 
 struct KafkaSourceStats {
@@ -70,6 +78,13 @@ public:
 
     KafkaSourceStats stats() const;
 
+    // Last offset durable in Iceberg per assigned partition (-1 when nothing
+    // was ever committed), for the commit lag
+    std::map<std::int32_t, std::int64_t> durableOffsets() const;
+
+    // Name of the consumer in logs and in the rdkafka_* metrics
+    static constexpr const char* kClient = "appender-consumer";
+
 private:
     void onAssigned(cppkafka::TopicPartitionList& partitions);
     void onRevoked(const cppkafka::TopicPartitionList& partitions);
@@ -79,6 +94,7 @@ private:
     cppkafka::TopicPartitionList partitionList(const std::set<std::int32_t>& partitions) const;
 
     const KafkaSourceOptions options_;
+    const std::shared_ptr<AppenderMetrics> metrics_;
     StagingRegistry& staging_;
     PipelinePool& pipelines_;
     IcebergCommitter& committer_;
@@ -91,8 +107,9 @@ private:
     std::set<std::int32_t> paused_;
     std::atomic<bool> stop_requested_ = false;
 
-    std::mutex hints_mutex_;
-    std::map<std::int32_t, std::int64_t> hints_;  // durable offsets not yet committed to Kafka
+    mutable std::mutex hints_mutex_;
+    std::map<std::int32_t, std::int64_t> hints_;    // durable offsets not yet committed to Kafka
+    std::map<std::int32_t, std::int64_t> durable_;  // durable offset per assigned partition
 
     mutable std::mutex stats_mutex_;
     KafkaSourceStats stats_;

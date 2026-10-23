@@ -35,9 +35,10 @@ public:
 class PartitionWriter {
 public:
     virtual ~PartitionWriter() = default;
-    // Stages rows (possibly none) and moves the partition's offset to max_offset
+    // Stages rows (possibly none) and moves the partition's offset to max_offset.
+    // kafka_ts_ms is the message's Kafka timestamp (-1 if unknown).
     virtual Result<void> append(std::span<const LogRow> rows, std::int64_t max_offset,
-                                std::size_t bytes) = 0;
+                                std::size_t bytes, std::int64_t kafka_ts_ms = -1) = 0;
     // Moves the offset without rows (a poison message that reached the DLQ)
     virtual void advanceOffset(std::int64_t offset) = 0;
 };
@@ -56,6 +57,12 @@ struct CommitContext {
     std::chrono::system_clock::time_point ingested_at;
 };
 
+// What the last commit added to the logs table, from its snapshot summary
+struct CommitFiles {
+    std::uint64_t added_data_files = 0;
+    std::optional<std::uint64_t> total_data_files;
+};
+
 // Writes sealed buffers to the logs table and their offsets to the offsets
 // table in one atomic Iceberg commit. Errors: Retryable when the commit
 // certainly did not land, Indeterminate when it may have, Fatal otherwise.
@@ -63,6 +70,10 @@ class IcebergSink {
 public:
     virtual ~IcebergSink() = default;
     virtual Result<void> commit(std::span<const SealedBuffer> buffers, const CommitContext& context) = 0;
+
+    // Data files of the commit that just succeeded with this many rows; nullopt
+    // when unknown (e.g. another writer committed since). Best effort.
+    virtual std::optional<CommitFiles> lastCommitFiles(std::size_t /*rows*/) { return std::nullopt; }
 };
 
 // Reads back what the offsets table says is durable

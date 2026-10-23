@@ -3,8 +3,12 @@
 #include "schema.hpp"
 #include "sql.hpp"
 
+#include "observability/log.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <charconv>
 #include <format>
-#include <iostream>
 
 namespace appender {
 namespace {
@@ -87,6 +91,51 @@ Result<void> DuckdbIcebergSink::commit(std::span<const SealedBuffer> buffers,
     return {};
 }
 
+std::optional<CommitFiles> commitFilesFromMetadata(std::string_view metadata_json,
+                                                   std::size_t rows) {
+    const auto metadata = nlohmann::json::parse(metadata_json, nullptr, /*allow_exceptions=*/false);
+    if (!metadata.is_object()) return std::nullopt;
+    const auto current = metadata.find("current-snapshot-id");
+    const auto snapshots = metadata.find("snapshots");
+    if (current == metadata.end() || snapshots == metadata.end() || !snapshots->is_array()) {
+        return std::nullopt;
+    }
+    // Summary values are strings in Iceberg table metadata
+    auto count = [](const nlohmann::json& summary, const char* key) -> std::optional<std::uint64_t> {
+        auto it = summary.find(key);
+        if (it == summary.end() || !it->is_string()) return std::nullopt;
+        const auto& text = it->get_ref<const std::string&>();
+        std::uint64_t value = 0;
+        auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (ec != std::errc{} || ptr != text.data() + text.size()) return std::nullopt;
+        return value;
+    };
+    for (const auto& snapshot : *snapshots) {
+        if (snapshot.value("snapshot-id", nlohmann::json()) != *current) continue;
+        const auto summary = snapshot.value("summary", nlohmann::json::object());
+        // Another writer (compaction) may have committed since ours
+        if (summary.value("operation", "") != "append" || count(summary, "added-records") != rows) {
+            return std::nullopt;
+        }
+        auto added = count(summary, "added-data-files");
+        if (!added) return std::nullopt;
+        return CommitFiles{*added, count(summary, "total-data-files")};
+    }
+    return std::nullopt;
+}
+
+std::optional<CommitFiles> DuckdbIcebergSink::lastCommitFiles(std::size_t rows) {
+    auto result = query(*conn_, std::format(
+        // ::JSON, not ::VARCHAR: a VARIANT cast to text uses DuckDB's struct notation
+        "SELECT metadata::JSON FROM iceberg_load_table_response({})", tables_.logs));
+    if (!result || (*result)->RowCount() == 0) {
+        obs::debug("sink", "reading the snapshot summary failed",
+                   {{"error", result ? std::string("no rows") : result.error().message}});
+        return std::nullopt;
+    }
+    return commitFilesFromMetadata((*result)->GetValue(0, 0).ToString(), rows);
+}
+
 DuckdbOffsetStore::DuckdbOffsetStore(DuckdbSession& session, std::string offsets_table,
                                      std::string topic)
     : conn_(session.connect()), offsets_table_(std::move(offsets_table)), topic_(std::move(topic)) {}
@@ -122,9 +171,9 @@ Result<void> DuckdbOffsetStore::prune() {
         if (!probe) return std::unexpected(probe.error());
         rewrite_available_ = (*probe)->GetValue(0, 0).GetValue<std::int64_t>() > 0;
         if (!*rewrite_available_) {
-            std::cout << std::format(
-                "Offsets table maintenance skipped: this DuckDB build has no "
-                "iceberg_rewrite_data_files; compact {} externally\n", offsets_table_);
+            obs::info("sink", "offsets table maintenance skipped: this DuckDB build has no "
+                              "iceberg_rewrite_data_files; compact the table externally",
+                      {{"table", offsets_table_}});
         }
     }
     if (!*rewrite_available_) return {};

@@ -23,6 +23,8 @@ struct AppenderConfig {
     std::string consumer_group = "otel-appender";
     std::string dlq_topic;  // defaults to "<topic>-dlq"
     int max_poll_interval_ms = 300'000;
+    // librdkafka statistics (rdkafka_* metrics, consumer and commit lag); 0 disables them
+    int kafka_stats_interval_ms = 15'000;
 
     // Iceberg REST catalog
     std::string catalog_uri;

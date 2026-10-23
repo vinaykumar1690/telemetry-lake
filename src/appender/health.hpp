@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
+
+#include <prometheus/metric_family.h>
 
 namespace appender {
 
@@ -47,7 +50,10 @@ Readiness evaluateReadiness(const HealthSnapshot& snapshot,
                             std::chrono::seconds poll_stall = std::chrono::seconds(30),
                             std::uint64_t max_consecutive_failures = 3);
 
-// Prometheus text exposition format
+// The appender_* metrics derived from a snapshot (read at scrape time)
+std::vector<prometheus::MetricFamily> snapshotMetrics(const HealthSnapshot& snapshot);
+
+// snapshotMetrics in the Prometheus text exposition format
 std::string formatMetrics(const HealthSnapshot& snapshot);
 
 }  // namespace appender

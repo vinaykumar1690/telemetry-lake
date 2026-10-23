@@ -4,8 +4,9 @@
 
 #include <algorithm>
 #include <array>
+#include "observability/log.hpp"
+
 #include <format>
-#include <iostream>
 
 void std::default_delete<duckdb::ActiveTimer>::operator()(duckdb::ActiveTimer* timer) const noexcept {
     delete timer;
@@ -122,7 +123,7 @@ Result<void> ensureLogsTable(duckdb::Connection& conn, const std::string& qualif
             return fatal(std::format("cannot add promoted column {} to {}: {}", column.name, qualified_name,
                                      added.error().message));
         }
-        std::cout << std::format("Added promoted column {} to {}\n", column.name, qualified_name);
+        obs::info("session", "added promoted column", {{"column", column.name}, {"table", qualified_name}});
     }
     return {};
 }
@@ -237,7 +238,7 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const Appender
     if (auto r = ensureTable(*conn, tables.offsets, schema::defs(schema::kOffsetsColumns)); !r) {
         return std::unexpected(r.error());
     }
-    std::cout << std::format("Iceberg tables ready: {} and {}\n", tables.logs, tables.offsets);
+    obs::info("session", "Iceberg tables ready", {{"logs", tables.logs}, {"offsets", tables.offsets}});
     return session;
 }
 

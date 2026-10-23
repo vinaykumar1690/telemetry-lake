@@ -1,6 +1,7 @@
 #ifndef APPENDER_PIPELINE_POOL_HPP
 #define APPENDER_PIPELINE_POOL_HPP
 
+#include "appender_metrics.hpp"
 #include "bounded_queue.hpp"
 #include "dlq_producer.hpp"
 #include "error.hpp"
@@ -31,6 +32,7 @@ struct Work {
     std::string_view key;
     std::string_view payload;
     std::shared_ptr<const void> owner;
+    std::int64_t kafka_ts_ms = -1;  // Kafka message timestamp, -1 if none
 };
 
 struct WorkWeight {
@@ -45,6 +47,7 @@ struct PipelineOptions {
     std::chrono::milliseconds retry_max_delay{10'000};
     int max_append_attempts = 10;  // staging failures beyond this are fatal
     std::vector<std::string> promoted_keys;  // TableSchema::promotedKeys()
+    std::shared_ptr<AppenderMetrics> metrics;  // standalone when null
 };
 
 struct PipelineStats {
@@ -89,6 +92,9 @@ public:
 
     PipelineStats stats() const;
 
+    // Bytes queued on each thread
+    std::vector<std::size_t> queueBytes() const;
+
 private:
     using Queue = BoundedQueue<Work, WorkWeight>;
 
@@ -109,6 +115,7 @@ private:
     Worker& workerFor(std::int32_t partition) const;
 
     const PipelineOptions options_;
+    const std::shared_ptr<AppenderMetrics> metrics_;
     StagingLookup& staging_;
     DlqSink& dlq_;
     FatalCallback on_fatal_;

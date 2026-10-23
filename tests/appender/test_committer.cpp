@@ -17,9 +17,10 @@ namespace {
 class FakeSource : public StagingSource {
 public:
     void stage(std::int32_t partition, std::int64_t max_offset, std::size_t rows = 1,
-               std::size_t bytes = 10) {
+               std::size_t bytes = 10, std::int64_t kafka_ts_ms = -1) {
         std::lock_guard lock(mutex_);
-        staged_[partition] = {partition, std::format("t{}", next_table_++), max_offset, rows, bytes};
+        staged_[partition] = {partition, std::format("t{}", next_table_++), max_offset, rows, bytes,
+                              kafka_ts_ms, kafka_ts_ms};
         oldest_ = std::chrono::steady_clock::now();
     }
 
@@ -101,6 +102,19 @@ public:
         std::lock_guard lock(mutex_);
         scripted_.push_back(std::move(result));
     }
+    std::optional<CommitFiles> lastCommitFiles(std::size_t rows) override {
+        std::lock_guard lock(mutex_);
+        files_rows_.push_back(rows);
+        return files_;
+    }
+    void setFiles(std::optional<CommitFiles> files) {
+        std::lock_guard lock(mutex_);
+        files_ = files;
+    }
+    std::vector<std::size_t> filesRows() const {
+        std::lock_guard lock(mutex_);
+        return files_rows_;
+    }
     int calls() const {
         std::lock_guard lock(mutex_);
         return calls_;
@@ -123,6 +137,8 @@ private:
     std::map<std::int32_t, std::int64_t> durable_;
     std::size_t rows_ = 0;
     int calls_ = 0;
+    std::optional<CommitFiles> files_;
+    std::vector<std::size_t> files_rows_;
 };
 
 // Reads what the fake sink made durable
@@ -387,4 +403,81 @@ TEST(IcebergCommitterTest, MaintenanceRunsAfterSuccessfulCommits) {
     std::this_thread::sleep_for(5ms);
     ASSERT_TRUE(h.committer.requestFlush().get());
     EXPECT_GE(h.store.prunes, 1);
+}
+
+TEST(IcebergCommitterTest, CommitMetrics) {
+    auto options = fastOptions();
+    options.metrics = AppenderMetrics::standalone();
+    const auto& m = *options.metrics;
+    Harness h(options);
+    h.sink.setFiles(CommitFiles{3, 42});
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    h.source.stage(0, 41, 3, 100, now_ms - 2000);
+    h.source.stage(1, 7, 2, 50, now_ms - 1000);
+    h.sink.script(retryable("409 conflict"));
+    h.committer.start();
+    ASSERT_TRUE(h.committer.requestFlush().get());
+
+    EXPECT_EQ(m.buffers_sealed.Value(), 2);
+    EXPECT_EQ(m.sealed_buffer_rows.Collect().histogram.sample_sum, 5);
+    EXPECT_EQ(m.sealed_buffer_bytes.Collect().histogram.sample_sum, 150);
+    EXPECT_EQ(m.commit_attempts.Add({{"outcome", "retryable"}}).Value(), 1);
+    EXPECT_EQ(m.commit_attempts.Add({{"outcome", "ok"}}).Value(), 1);
+    EXPECT_EQ(m.commit_buffers.Collect().histogram.sample_sum, 2);
+    EXPECT_EQ(m.commit_partitions.Collect().histogram.sample_sum, 2);
+    EXPECT_EQ(m.commit_duration.Collect().histogram.sample_count, 1u);
+    EXPECT_EQ(m.committed_payload_bytes.Value(), 150);
+    EXPECT_EQ(h.sink.filesRows(), (std::vector<std::size_t>{5}));
+    EXPECT_EQ(m.data_files_committed.Value(), 3);
+    EXPECT_EQ(m.table_data_files.Value(), 42);
+    EXPECT_EQ(m.commit_files_unknown.Value(), 0);
+
+    // One latency sample per buffer, measured from its oldest message
+    const auto latency = m.end_to_end_latency.Collect().histogram;
+    EXPECT_EQ(latency.sample_count, 2u);
+    EXPECT_GE(latency.sample_sum, 3.0);
+    EXPECT_EQ(h.committer.lastCommittedTimestamps(),
+              (std::map<std::int32_t, std::int64_t>{{0, now_ms - 2000}, {1, now_ms - 1000}}));
+
+    // Revoked partitions stop reporting freshness
+    h.committer.discard({1});
+    EXPECT_EQ(h.committer.lastCommittedTimestamps().size(), 1u);
+}
+
+TEST(IcebergCommitterTest, OffsetsOnlyCommitDoesNotReadFiles) {
+    auto options = fastOptions();
+    options.metrics = AppenderMetrics::standalone();
+    Harness h(options);
+    h.source.stage(0, 5, /*rows=*/0);  // e.g. a poison message that reached the DLQ
+    h.committer.start();
+    ASSERT_TRUE(h.committer.requestFlush().get());
+    EXPECT_TRUE(h.sink.filesRows().empty());
+    EXPECT_EQ(options.metrics->commit_files_unknown.Value(), 0);
+    EXPECT_TRUE(h.committer.lastCommittedTimestamps().empty());  // no timestamp known
+}
+
+TEST(IcebergCommitterTest, UnknownFilesAreCounted) {
+    auto options = fastOptions();
+    options.metrics = AppenderMetrics::standalone();
+    Harness h(options);
+    h.source.stage(0, 5, 2);
+    h.committer.start();
+    ASSERT_TRUE(h.committer.requestFlush().get());
+    EXPECT_EQ(options.metrics->commit_files_unknown.Value(), 1);
+    EXPECT_EQ(options.metrics->data_files_committed.Value(), 0);
+}
+
+TEST(IcebergCommitterTest, LandedAfterErrorIsCounted) {
+    auto options = fastOptions();
+    options.metrics = AppenderMetrics::standalone();
+    Harness h(options);
+    h.sink.land_on_indeterminate_ = true;
+    h.sink.script(indeterminate("timeout waiting for catalog"));
+    h.source.stage(0, 9, 4);
+    h.committer.start();
+    ASSERT_TRUE(h.committer.requestFlush().get());
+    EXPECT_EQ(options.metrics->commit_landed_after_error.Value(), 1);
+    EXPECT_EQ(options.metrics->commit_attempts.Add({{"outcome", "indeterminate"}}).Value(), 1);
 }

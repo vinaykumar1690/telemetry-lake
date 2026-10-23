@@ -19,6 +19,8 @@ public:
     struct Handlers {
         std::function<HealthSnapshot()> snapshot;
         std::function<Result<void>()> flush;  // blocks until the flush cycle ends
+        // Body of /metrics; the snapshot's metrics alone when unset
+        std::function<std::string()> metrics;
     };
 
     HealthServer(std::uint16_t port, Handlers handlers);

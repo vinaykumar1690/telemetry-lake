@@ -195,9 +195,9 @@ bool KafkaStatsCollector::update(std::string_view client, std::string_view text)
     return true;
 }
 
-std::map<std::int32_t, std::int64_t> KafkaStatsCollector::highWatermarks(
-    std::string_view client, std::string_view topic) const {
-    std::map<std::int32_t, std::int64_t> out;
+std::map<std::int32_t, Watermarks> KafkaStatsCollector::watermarks(std::string_view client,
+                                                                   std::string_view topic) const {
+    std::map<std::int32_t, Watermarks> out;
     std::lock_guard lock(mutex_);
     auto stats = stats_.find(client);
     if (stats == stats_.end()) return out;
@@ -207,10 +207,9 @@ std::map<std::int32_t, std::int64_t> KafkaStatsCollector::highWatermarks(
         std::int32_t number_id = 0;
         auto [ptr, ec] = std::from_chars(id.data(), id.data() + id.size(), number_id);
         if (ec != std::errc{} || number_id < 0) continue;
-        auto hi = partition.find("hi_offset");
-        if (hi != partition.end() && hi->is_number_integer() && hi->get<std::int64_t>() >= 0) {
-            out[number_id] = hi->get<std::int64_t>();
-        }
+        const auto hi = partition.value("hi_offset", std::int64_t{-1});
+        if (hi < 0) continue;
+        out[number_id] = {std::max<std::int64_t>(partition.value("lo_offset", std::int64_t{0}), 0), hi};
     }
     return out;
 }

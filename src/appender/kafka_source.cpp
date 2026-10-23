@@ -1,10 +1,11 @@
 #include "kafka_source.hpp"
 
 #include "backoff.hpp"
+#include "observability/kafka_stats.hpp"
+#include "observability/log.hpp"
 
 #include <cstdlib>
 #include <format>
-#include <iostream>
 #include <random>
 #include <thread>
 
@@ -29,6 +30,7 @@ KafkaSource::KafkaSource(KafkaSourceOptions options, StagingRegistry& staging,
                          PipelinePool& pipelines, IcebergCommitter& committer,
                          OffsetStore& offsets, FatalCallback on_fatal)
     : options_(std::move(options)),
+      metrics_(options_.metrics ? options_.metrics : AppenderMetrics::standalone()),
       staging_(staging),
       pipelines_(pipelines),
       committer_(committer),
@@ -54,21 +56,39 @@ Result<void> KafkaSource::init() {
             // Eager rebalancing: a partition is not handed to its next owner
             // before our revoke callback returns, which is what the fence relies on
             {"partition.assignment.strategy", "range,roundrobin"},
+            {"statistics.interval.ms", options_.stats_interval_ms},
         };
+        // Stats, log and error callbacks run inside poll(), on this thread
+        if (options_.stats) {
+            config.set_stats_callback([stats = options_.stats](cppkafka::KafkaHandleBase&,
+                                                               const std::string& json) {
+                stats->update(kClient, json);
+            });
+        }
+        config.set_log_callback([](cppkafka::KafkaHandleBase&, int level,
+                                   const std::string& facility, const std::string& message) {
+            obs::logKafka(kClient, level, facility, message);
+        });
+        config.set_error_callback([](cppkafka::KafkaHandleBase&, int error,
+                                     const std::string& reason) {
+            const auto code = static_cast<rd_kafka_resp_err_t>(error);
+            obs::logKafkaError(kClient, error, rd_kafka_err2name(code), reason,
+                               code == RD_KAFKA_RESP_ERR__FATAL);
+        });
         consumer_ = std::make_unique<cppkafka::Consumer>(config);
         consumer_->set_assignment_callback(
             [this](cppkafka::TopicPartitionList& partitions) { onAssigned(partitions); });
         consumer_->set_revocation_callback(
             [this](const cppkafka::TopicPartitionList& partitions) { onRevoked(partitions); });
         consumer_->set_rebalance_error_callback([](cppkafka::Error error) {
-            std::cerr << std::format("Kafka rebalance error: {}\n", error.to_string());
+            obs::error("kafka", "rebalance error", {{"client", kClient}, {"error", error.to_string()}});
         });
         consumer_->subscribe({options_.topic});
     } catch (const std::exception& e) {
         return fatal(std::format("cannot create Kafka consumer: {}", e.what()));
     }
-    std::cout << std::format("Kafka consumer subscribed to {} (group {})\n", options_.topic,
-                             options_.consumer_group);
+    obs::info("kafka", "consumer subscribed",
+              {{"topic", options_.topic}, {"group", options_.consumer_group}});
     return {};
 }
 
@@ -102,19 +122,21 @@ void KafkaSource::run() {
                 const auto now = std::chrono::steady_clock::now();
                 if (now - last_error_log_ > std::chrono::seconds(5)) {
                     last_error_log_ = now;
-                    std::cerr << std::format("Kafka consumer error: {}\n",
-                                             message.get_error().to_string());
+                    obs::warn("kafka", "consumer error",
+                              {{"client", kClient}, {"error", message.get_error().to_string()}});
                 }
                 continue;
             }
             auto owner = std::make_shared<cppkafka::Message>(std::move(message));
             const auto& payload = owner->get_payload();
             const auto& key = owner->get_key();
+            const auto timestamp = owner->get_timestamp();
             Work work{owner->get_partition(), owner->get_offset(),
                       std::string_view(reinterpret_cast<const char*>(key.get_data()), key.get_size()),
                       std::string_view(reinterpret_cast<const char*>(payload.get_data()),
                                        payload.get_size()),
-                      owner};
+                      owner,
+                      timestamp ? timestamp->get_timestamp().count() : -1};
             flow_.offer(std::move(work), route);
         }
         flow_.drain(route);
@@ -152,7 +174,7 @@ void KafkaSource::updatePauses() {
             for (auto p : to_resume) paused_.erase(p);
         }
     } catch (const std::exception& e) {
-        std::cerr << std::format("Pausing/resuming partitions failed: {}\n", e.what());
+        obs::warn("kafka", "pausing/resuming partitions failed", {{"error", e.what()}});
     }
 }
 
@@ -161,7 +183,16 @@ void KafkaSource::onCommitted(const std::map<std::int32_t, std::int64_t>& offset
     for (auto [partition, offset] : offsets) {
         auto& hint = hints_[partition];
         hint = std::max(hint, offset);
+        // Only partitions still assigned; a revoke erases the entry
+        if (auto it = durable_.find(partition); it != durable_.end()) {
+            it->second = std::max(it->second, offset);
+        }
     }
+}
+
+std::map<std::int32_t, std::int64_t> KafkaSource::durableOffsets() const {
+    std::lock_guard lock(hints_mutex_);
+    return durable_;
 }
 
 void KafkaSource::commitHints(bool synchronous) {
@@ -181,7 +212,7 @@ void KafkaSource::commitHints(bool synchronous) {
         else consumer_->async_commit(list);
     } catch (const std::exception& e) {
         // Hints only: the offsets table already holds the truth
-        std::cerr << std::format("Kafka offset commit (hint) failed: {}\n", e.what());
+        obs::warn("kafka", "offset commit (hint) failed", {{"error", e.what()}});
     }
 }
 
@@ -194,7 +225,8 @@ cppkafka::TopicPartitionList KafkaSource::partitionList(const std::set<std::int3
 void KafkaSource::onAssigned(cppkafka::TopicPartitionList& partitions) {
     const auto assigned = ids(partitions);
     const std::vector<std::int32_t> list(assigned.begin(), assigned.end());
-    std::cout << std::format("Partitions assigned: {}\n", describe(assigned));
+    obs::info("kafka", "partitions assigned", {{"partitions", describe(assigned)}});
+    metrics_->partitions_assigned.Increment(static_cast<double>(assigned.size()));
 
     // Bounded retries: the catalog may be briefly unavailable, but this runs
     // inside poll() and must finish well within max.poll.interval.ms
@@ -207,11 +239,12 @@ void KafkaSource::onAssigned(cppkafka::TopicPartitionList& partitions) {
         }
         resume = resumeOffsets(list, offsets_.lastCommitted(list));
         if (resume) break;
-        std::cerr << std::format("Reading committed offsets failed: {}\n", resume.error().message);
+        obs::warn("kafka", "reading committed offsets failed",
+                  {{"attempt", attempt + 1}, {"error", resume.error().message}});
     }
     if (!resume) {
         // Starting at any other position could duplicate or skip data
-        std::cerr << "Cannot determine where to resume; exiting\n";
+        obs::error("kafka", "cannot determine where to resume; exiting");
         std::_Exit(2);
     }
 
@@ -220,11 +253,16 @@ void KafkaSource::onAssigned(cppkafka::TopicPartitionList& partitions) {
         // This list is what cppkafka assigns after the callback returns, so
         // setting the offset here is the seek
         tp.set_offset(next ? *next : RD_KAFKA_OFFSET_BEGINNING);
-        std::cout << std::format("Partition {}: resuming at {}\n", tp.get_partition(),
-                                 next ? std::to_string(*next) : std::string("beginning"));
+        obs::info("kafka", "partition resuming",
+                  {{"partition", tp.get_partition()},
+                   {"offset", next ? std::to_string(*next) : std::string("beginning")}});
+        {
+            std::lock_guard lock(hints_mutex_);
+            durable_[tp.get_partition()] = next ? *next - 1 : -1;
+        }
         if (auto added = staging_.add(tp.get_partition()); !added) {
-            std::cerr << std::format("Partition {}: staging setup failed: {}\n",
-                                     tp.get_partition(), added.error().message);
+            obs::error("kafka", "partition staging setup failed; exiting",
+                       {{"partition", tp.get_partition()}, {"error", added.error().message}});
             std::_Exit(2);
         }
     }
@@ -234,17 +272,23 @@ void KafkaSource::onAssigned(cppkafka::TopicPartitionList& partitions) {
 
 void KafkaSource::onRevoked(const cppkafka::TopicPartitionList& partitions) {
     const auto revoked = ids(partitions);
-    std::cout << std::format("Partitions revoked: {}\n", describe(revoked));
+    obs::info("kafka", "partitions revoked", {{"partitions", describe(revoked)}});
+    metrics_->partitions_revoked.Increment(static_cast<double>(revoked.size()));
 
     // Until this returns the group will not hand these partitions to anyone
     // else, so any commit for them must be finished (or abandoned) by then
-    const auto deadline = std::chrono::steady_clock::now() + options_.revoke_timeout;
+    const auto fence_started = std::chrono::steady_clock::now();
+    const auto deadline = fence_started + options_.revoke_timeout;
     if (!committer_.fence(revoked, deadline)) {
-        std::cerr << std::format("Partitions {}: an Iceberg commit is still in flight after {}s; "
-                                 "exiting so it cannot race the next owner\n",
-                                 describe(revoked), options_.revoke_timeout.count());
+        obs::error("kafka",
+                   "an Iceberg commit is still in flight after the revoke timeout; exiting so it "
+                   "cannot race the next owner",
+                   {{"partitions", describe(revoked)},
+                    {"timeout_s", options_.revoke_timeout.count()}});
         std::_Exit(2);
     }
+    metrics_->revoke_fence_duration.Observe(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - fence_started).count());
     pipelines_.dropPartitions(revoked);
     flow_.forget(revoked);
     committer_.discard(revoked);
@@ -255,6 +299,8 @@ void KafkaSource::onRevoked(const cppkafka::TopicPartitionList& partitions) {
         assigned_.erase(p);
         paused_.erase(p);
     }
+    std::lock_guard lock(hints_mutex_);
+    for (auto p : revoked) durable_.erase(p);
 }
 
 void KafkaSource::shutdown() {

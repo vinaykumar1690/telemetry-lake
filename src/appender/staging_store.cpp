@@ -6,8 +6,9 @@
 #include "utf8.hpp"
 
 #include <algorithm>
+#include "observability/log.hpp"
+
 #include <format>
-#include <iostream>
 #include <limits>
 
 namespace appender {
@@ -117,7 +118,7 @@ Result<void> PartitionStaging::createGeneration() {
 }
 
 Result<void> PartitionStaging::append(std::span<const LogRow> rows, std::int64_t max_offset,
-                                      std::size_t bytes) {
+                                      std::size_t bytes, std::int64_t kafka_ts_ms) {
     std::lock_guard lock(mutex_);
     if (!rows.empty()) {
         try {
@@ -185,6 +186,10 @@ Result<void> PartitionStaging::append(std::span<const LogRow> rows, std::int64_t
     bytes_ += bytes;
     budget_.add(bytes);
     max_offset_ = std::max(max_offset_, max_offset);
+    if (kafka_ts_ms >= 0) {
+        min_kafka_ts_ms_ = min_kafka_ts_ms_ < 0 ? kafka_ts_ms : std::min(min_kafka_ts_ms_, kafka_ts_ms);
+        max_kafka_ts_ms_ = std::max(max_kafka_ts_ms_, kafka_ts_ms);
+    }
     dirty_ = true;
     return {};
 }
@@ -200,7 +205,8 @@ Result<std::optional<SealedBuffer>> PartitionStaging::seal() {
     std::lock_guard lock(mutex_);
     if (!dirty_) return std::optional<SealedBuffer>{};
 
-    SealedBuffer sealed{partition_, table_, max_offset_, rows_, bytes_};
+    SealedBuffer sealed{partition_, table_, max_offset_, rows_, bytes_, min_kafka_ts_ms_,
+                        max_kafka_ts_ms_};
     if (auto created = createGeneration(); !created) {
         table_ = sealed.table;  // keep appending to the old generation
         return std::unexpected(created.error());
@@ -208,6 +214,8 @@ Result<std::optional<SealedBuffer>> PartitionStaging::seal() {
     rows_ = 0;
     bytes_ = 0;
     dirty_ = false;
+    min_kafka_ts_ms_ = -1;
+    max_kafka_ts_ms_ = -1;
     first_append_.reset();
     return std::optional<SealedBuffer>{std::move(sealed)};
 }
@@ -221,6 +229,8 @@ void PartitionStaging::discard() {
     rows_ = 0;
     bytes_ = 0;
     dirty_ = false;
+    min_kafka_ts_ms_ = -1;
+    max_kafka_ts_ms_ = -1;
     first_append_.reset();
 }
 
@@ -286,8 +296,8 @@ Result<std::vector<SealedBuffer>> StagingRegistry::sealAll(const std::set<std::i
         if (!result) {
             // Generations sealed so far still go out with this commit
             if (sealed.empty()) return std::unexpected(result.error());
-            std::cerr << std::format("Partition {}: seal failed: {}\n", staging->partition(),
-                                     result.error().message);
+            obs::warn("staging", "seal failed",
+                      {{"partition", staging->partition()}, {"error", result.error().message}});
             continue;
         }
         if (*result) sealed.push_back(std::move(**result));
@@ -301,8 +311,8 @@ void StagingRegistry::dropSealed(const SealedBuffer& sealed) {
         if (auto dropped = query(drop_conn_, std::format("DROP TABLE IF EXISTS {}",
                                                          sql::identifier(sealed.table)));
             !dropped) {
-            std::cerr << std::format("Failed to drop staging table {}: {}\n", sealed.table,
-                                     dropped.error().message);
+            obs::warn("staging", "failed to drop a staging table",
+                      {{"table", sealed.table}, {"error", dropped.error().message}});
         }
     }
     budget_.release(sealed.bytes);

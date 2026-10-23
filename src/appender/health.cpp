@@ -1,7 +1,10 @@
 #include "health.hpp"
 
+#include "observability/metrics.hpp"
+
+#include <prometheus/text_serializer.h>
+
 #include <format>
-#include <iterator>
 
 namespace appender {
 
@@ -17,44 +20,51 @@ Readiness evaluateReadiness(const HealthSnapshot& s, std::chrono::seconds poll_s
     return {true, "ok"};
 }
 
-std::string formatMetrics(const HealthSnapshot& s) {
-    std::string out;
-    auto metric = [&](std::string_view name, std::string_view type, std::string_view help,
-                      auto value) {
-        std::format_to(std::back_inserter(out), "# HELP {0} {1}\n# TYPE {0} {2}\n{0} {3}\n", name,
-                       help, type, value);
+std::vector<prometheus::MetricFamily> snapshotMetrics(const HealthSnapshot& s) {
+    std::vector<prometheus::MetricFamily> out;
+    auto metric = [&](const char* name, prometheus::MetricType type, const char* help, double value) {
+        out.push_back(obs::FamilyBuilder(name, help, type).add(value).take());
     };
-    metric("appender_fatal", "gauge", "1 once the appender hit a fatal error", s.fatal ? 1 : 0);
-    metric("appender_assigned_partitions", "gauge", "Kafka partitions assigned",
-           s.assigned_partitions);
-    metric("appender_paused_partitions", "gauge", "Partitions paused by backpressure",
-           s.paused_partitions);
-    metric("appender_parked_messages", "gauge", "Messages waiting for pipeline capacity",
-           s.parked_messages);
-    metric("appender_messages_total", "counter", "Kafka messages processed", s.messages);
-    metric("appender_rows_staged_total", "counter", "Log rows staged", s.rows_staged);
-    metric("appender_poison_messages_total", "counter", "Undecodable messages sent to the DLQ",
-           s.poison_messages);
-    metric("appender_dlq_failures_total", "counter", "Failed DLQ deliveries (retried)",
-           s.dlq_failures);
-    metric("appender_staged_bytes", "gauge", "Bytes staged or awaiting commit", s.staged_bytes);
-    metric("appender_staged_bytes_cap", "gauge", "Staged bytes at which pipelines block",
-           s.staged_bytes_cap);
-    metric("appender_commits_total", "counter", "Successful Iceberg commits", s.commits);
-    metric("appender_commit_failures_total", "counter", "Failed Iceberg commit cycles",
-           s.commit_failures);
-    metric("appender_commit_consecutive_failures", "gauge",
-           "Iceberg commit cycles failed in a row", s.consecutive_commit_failures);
-    metric("appender_rows_committed_total", "counter", "Log rows committed to Iceberg",
-           s.rows_committed);
-    metric("appender_last_commit_duration_seconds", "gauge", "Duration of the last commit cycle",
+    constexpr auto kGauge = prometheus::MetricType::Gauge;
+    constexpr auto kCounter = prometheus::MetricType::Counter;
+    auto count = [](auto v) { return static_cast<double>(v); };
+
+    metric("appender_fatal", kGauge, "1 once the appender hit a fatal error", s.fatal ? 1 : 0);
+    metric("appender_assigned_partitions", kGauge, "Kafka partitions assigned",
+           count(s.assigned_partitions));
+    metric("appender_paused_partitions", kGauge, "Partitions paused by backpressure",
+           count(s.paused_partitions));
+    metric("appender_parked_messages", kGauge, "Messages waiting for pipeline capacity",
+           count(s.parked_messages));
+    metric("appender_messages_total", kCounter, "Kafka messages processed", count(s.messages));
+    metric("appender_rows_staged_total", kCounter, "Log rows staged (log events processed)",
+           count(s.rows_staged));
+    metric("appender_poison_messages_total", kCounter, "Undecodable messages sent to the DLQ",
+           count(s.poison_messages));
+    metric("appender_dlq_failures_total", kCounter, "Failed DLQ deliveries (retried)",
+           count(s.dlq_failures));
+    metric("appender_staged_bytes", kGauge, "Bytes staged or awaiting commit", count(s.staged_bytes));
+    metric("appender_staged_bytes_cap", kGauge, "Staged bytes at which pipelines block",
+           count(s.staged_bytes_cap));
+    metric("appender_commits_total", kCounter, "Successful Iceberg commits", count(s.commits));
+    metric("appender_commit_failures_total", kCounter, "Failed Iceberg commit cycles",
+           count(s.commit_failures));
+    metric("appender_commit_consecutive_failures", kGauge, "Iceberg commit cycles failed in a row",
+           count(s.consecutive_commit_failures));
+    metric("appender_rows_committed_total", kCounter, "Log rows committed to Iceberg",
+           count(s.rows_committed));
+    metric("appender_last_commit_duration_seconds", kGauge, "Duration of the last commit cycle",
            std::chrono::duration<double>(s.last_commit_duration).count());
     if (s.last_commit_success) {
-        metric("appender_seconds_since_last_commit", "gauge",
+        metric("appender_seconds_since_last_commit", kGauge,
                "Seconds since the last successful commit cycle",
                std::chrono::duration<double>(s.now - *s.last_commit_success).count());
     }
     return out;
+}
+
+std::string formatMetrics(const HealthSnapshot& s) {
+    return prometheus::TextSerializer().Serialize(snapshotMetrics(s));
 }
 
 }  // namespace appender

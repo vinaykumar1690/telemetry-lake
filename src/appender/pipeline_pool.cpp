@@ -4,14 +4,17 @@
 #include "log_transformer.hpp"
 #include "otlp_decoder.hpp"
 
-#include <format>
-#include <iostream>
+#include "observability/log.hpp"
 
 namespace appender {
 
 PipelinePool::PipelinePool(PipelineOptions options, StagingLookup& staging, DlqSink& dlq,
                            FatalCallback on_fatal)
-    : options_(std::move(options)), staging_(staging), dlq_(dlq), on_fatal_(std::move(on_fatal)) {
+    : options_(std::move(options)),
+      metrics_(options_.metrics ? options_.metrics : AppenderMetrics::standalone()),
+      staging_(staging),
+      dlq_(dlq),
+      on_fatal_(std::move(on_fatal)) {
     for (std::size_t i = 0; i < std::max<std::size_t>(options_.threads, 1); ++i) {
         workers_.push_back(std::make_unique<Worker>(options_.queue_bytes));
     }
@@ -77,6 +80,12 @@ PipelineStats PipelinePool::stats() const {
     return {messages_.load(), rows_.load(), poison_.load(), dlq_failures_.load()};
 }
 
+std::vector<std::size_t> PipelinePool::queueBytes() const {
+    std::vector<std::size_t> out;
+    for (const auto& worker : workers_) out.push_back(worker->queue.weight());
+    return out;
+}
+
 bool PipelinePool::cancelled(std::int32_t partition) const {
     return aborting_ || dropping_.contains(partition);
 }
@@ -115,8 +124,8 @@ void PipelinePool::run(Worker& worker) {
 
 void PipelinePool::process(Worker& worker, const Work& work) {
     auto block = [&](std::string_view why) {
-        std::cerr << std::format("Partition {}: stopped at offset {}: {}\n", work.partition,
-                                 work.offset, why);
+        obs::error("pipeline", "partition stopped",
+                   {{"partition", work.partition}, {"offset", work.offset}, {"reason", why}});
         std::lock_guard lock(mutex_);
         worker.blocked.insert(work.partition);
     };
@@ -124,6 +133,8 @@ void PipelinePool::process(Worker& worker, const Work& work) {
     auto writer = staging_.writer(work.partition);
     if (!writer) return;  // revoked while queued
     ++messages_;
+    metrics_->consumed_bytes.Increment(static_cast<double>(work.payload.size()));
+    const auto started = std::chrono::steady_clock::now();
 
     auto decoded = decodeKafkaPayload(work.payload);
     if (!decoded) {
@@ -132,10 +143,14 @@ void PipelinePool::process(Worker& worker, const Work& work) {
                                &decoded.error()};
         for (int attempt = 0;; ++attempt) {
             auto sent = dlq_.send(record);
-            if (sent) break;
+            if (sent) {
+                metrics_->dlq_sent_bytes.Increment(static_cast<double>(work.payload.size()));
+                break;
+            }
             ++dlq_failures_;
-            std::cerr << std::format("Partition {} offset {}: DLQ send failed: {}\n",
-                                     work.partition, work.offset, sent.error().message);
+            obs::warn("pipeline", "DLQ send failed",
+                      {{"partition", work.partition}, {"offset", work.offset},
+                       {"attempt", attempt + 1}, {"error", sent.error().message}});
             if (!sleepUnlessCancelled(work.partition, backoff(attempt))) {
                 return block("DLQ unavailable");
             }
@@ -148,16 +163,20 @@ void PipelinePool::process(Worker& worker, const Work& work) {
     transformLogs(*decoded, {work.partition, work.offset}, rows, options_.promoted_keys);
 
     // Backpressure: wait while staging is over its byte cap
+    const auto wait_started = std::chrono::steady_clock::now();
     while (!staging_.waitForCapacity(std::chrono::milliseconds(200))) {
         std::lock_guard lock(mutex_);
         if (cancelled(work.partition)) return block("cancelled while waiting for capacity");
     }
+    const auto waited = std::chrono::steady_clock::now() - wait_started;
+    metrics_->backpressure_seconds.Increment(std::chrono::duration<double>(waited).count());
 
     for (int attempt = 0;; ++attempt) {
-        auto appended = writer->append(rows, work.offset, work.payload.size());
+        auto appended = writer->append(rows, work.offset, work.payload.size(), work.kafka_ts_ms);
         if (appended) break;
-        std::cerr << std::format("Partition {} offset {}: staging failed: {}\n", work.partition,
-                                 work.offset, appended.error().message);
+        obs::warn("pipeline", "staging failed",
+                  {{"partition", work.partition}, {"offset", work.offset},
+                   {"attempt", attempt + 1}, {"error", appended.error().message}});
         if (appended.error().kind == ErrorKind::Fatal || attempt + 1 >= options_.max_append_attempts) {
             block("staging failed");
             if (on_fatal_) on_fatal_(appended.error());
@@ -168,6 +187,8 @@ void PipelinePool::process(Worker& worker, const Work& work) {
         }
     }
     rows_ += rows.size();
+    metrics_->process_duration.Observe(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started - waited).count());
 }
 
 }  // namespace appender

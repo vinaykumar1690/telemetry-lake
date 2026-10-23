@@ -1,6 +1,7 @@
 #ifndef APPENDER_ICEBERG_COMMITTER_HPP
 #define APPENDER_ICEBERG_COMMITTER_HPP
 
+#include "appender_metrics.hpp"
 #include "error.hpp"
 #include "sink.hpp"
 
@@ -28,6 +29,7 @@ struct CommitterOptions {
     std::chrono::milliseconds retry_max_delay{10'000};
     std::chrono::milliseconds maintenance_interval{3'600'000};  // 0 disables
     std::chrono::milliseconds poll_interval{200};               // how often triggers are checked
+    std::shared_ptr<AppenderMetrics> metrics;                   // standalone when null
 };
 
 struct CommitterStats {
@@ -82,6 +84,9 @@ public:
 
     CommitterStats stats() const;
 
+    // Newest Kafka timestamp (ms since the epoch) committed per partition
+    std::map<std::int32_t, std::int64_t> lastCommittedTimestamps() const;
+
 private:
     void run();
     bool dueLocked(std::chrono::steady_clock::time_point now) const;
@@ -91,11 +96,15 @@ private:
     bool interruptedLocked() const;
     std::vector<SealedBuffer> batchLocked() const;
     void reportCommitted(const std::map<std::int32_t, std::int64_t>& offsets);
+    // Metrics and the log line of a successful commit
+    void recordCommit(const std::vector<SealedBuffer>& batch, std::size_t rows,
+                      std::chrono::steady_clock::duration duration);
 
     StagingSource& source_;
     IcebergSink& sink_;
     OffsetStore& store_;
     const CommitterOptions options_;
+    const std::shared_ptr<AppenderMetrics> metrics_;
     CommittedCallback on_committed_;
     FatalCallback on_fatal_;
 
@@ -112,6 +121,7 @@ private:
     std::chrono::steady_clock::time_point last_maintenance_;
     bool stopping_ = false;
     CommitterStats stats_;
+    std::map<std::int32_t, std::int64_t> last_committed_ts_ms_;
 
     std::mt19937 rng_{std::random_device{}()};
     std::thread thread_;

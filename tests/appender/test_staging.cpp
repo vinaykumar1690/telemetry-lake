@@ -277,3 +277,24 @@ TEST(DuckdbErrorTest, Classification) {
     EXPECT_EQ(classifyDuckdbError("HTTP Error: 503 Service Unavailable"), ErrorKind::Retryable);
     EXPECT_EQ(classifyDuckdbError("IO Error: Connection timed out"), ErrorKind::Retryable);
 }
+
+TEST_F(StagingTest, SealedBufferCarriesKafkaTimestamps) {
+    StagingRegistry registry(session_->database(), 1 << 20);
+    ASSERT_TRUE(registry.add(0));
+    auto staging = registry.find(0);
+    std::vector<LogRow> rows{makeRow(1, "a")};
+    ASSERT_TRUE(staging->append(rows, 1, 10, 2000));
+    ASSERT_TRUE(staging->append(rows, 2, 10, 1000));
+    ASSERT_TRUE(staging->append(rows, 3, 10));  // no timestamp
+    auto sealed = registry.sealAll();
+    ASSERT_TRUE(sealed);
+    ASSERT_EQ(sealed->size(), 1u);
+    EXPECT_EQ(sealed->front().min_kafka_ts_ms, 1000);
+    EXPECT_EQ(sealed->front().max_kafka_ts_ms, 2000);
+
+    // The next generation starts without timestamps
+    ASSERT_TRUE(staging->append(rows, 4, 10));
+    sealed = registry.sealAll();
+    ASSERT_TRUE(sealed);
+    EXPECT_EQ(sealed->front().min_kafka_ts_ms, -1);
+}

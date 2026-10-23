@@ -1,7 +1,8 @@
 #include "health_server.hpp"
 
+#include "observability/log.hpp"
+
 #include <format>
-#include <iostream>
 
 namespace appender {
 
@@ -29,7 +30,8 @@ HealthServer::HealthServer(std::uint16_t port, Handlers handlers)
     });
 
     CROW_ROUTE(app_, "/metrics")([this] {
-        crow::response response(200, formatMetrics(handlers_.snapshot()));
+        crow::response response(200, handlers_.metrics ? handlers_.metrics()
+                                                        : formatMetrics(handlers_.snapshot()));
         response.set_header("Content-Type", "text/plain; version=0.0.4");
         return response;
     });
@@ -44,8 +46,8 @@ void HealthServer::start() {
     app_.signal_clear();
     app_.loglevel(crow::LogLevel::Warning);
     running_ = app_.port(port_).concurrency(2).run_async();
-    std::cout << std::format("Health server listening on :{} (/health /ready /flush /metrics)\n",
-                             port_);
+    obs::info("health", "health server listening",
+              {{"port", port_}, {"paths", "/health /ready /flush /metrics"}});
 }
 
 void HealthServer::stop() {

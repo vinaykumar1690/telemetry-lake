@@ -19,6 +19,12 @@
 
 namespace obs {
 
+struct Watermarks {
+    std::int64_t low = 0;   // oldest offset still in the log
+    std::int64_t high = 0;  // offset of the next message to be written
+    bool operator==(const Watermarks&) const = default;
+};
+
 class KafkaStatsCollector : public prometheus::Collectable {
 public:
     // Stores the latest statistics document of a client (called from the
@@ -26,10 +32,10 @@ public:
     // document is not valid JSON.
     bool update(std::string_view client, std::string_view json);
 
-    // High watermark per partition of a topic, from the client's latest
-    // statistics; partitions without a known watermark are absent
-    std::map<std::int32_t, std::int64_t> highWatermarks(std::string_view client,
-                                                       std::string_view topic) const;
+    // Watermarks per partition of a topic, from the client's latest
+    // statistics; partitions without a known high watermark are absent
+    std::map<std::int32_t, Watermarks> watermarks(std::string_view client,
+                                                  std::string_view topic) const;
 
     std::vector<prometheus::MetricFamily> Collect() const override;
 

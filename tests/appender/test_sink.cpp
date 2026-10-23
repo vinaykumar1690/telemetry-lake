@@ -208,3 +208,33 @@ TEST(IcebergIntegrationTest, CommitAndRecoverAgainstLiveCatalog) {
     ASSERT_TRUE(pods) << pods.error().message;
     EXPECT_EQ((*pods)->GetValue(0, 0).GetValue<int64_t>(), 2);
 }
+
+// Table metadata as the Nessie catalog returns it (trimmed), after an append
+// of 1500 rows into 2 data files
+constexpr std::string_view kMetadata = R"({
+  "format-version": 2,
+  "current-snapshot-id": 2085327308212356669,
+  "snapshots": [{
+    "sequence-number": 2,
+    "snapshot-id": 2085327308212356669,
+    "summary": {"operation": "append", "total-records": "3000", "total-data-files": "5",
+                "added-data-files": "2", "added-records": "1500"}
+  }]
+})";
+
+TEST(CommitFilesTest, ReadsTheCurrentAppendSnapshot) {
+    auto files = commitFilesFromMetadata(kMetadata, 1500);
+    ASSERT_TRUE(files);
+    EXPECT_EQ(files->added_data_files, 2u);
+    EXPECT_EQ(files->total_data_files, 5u);
+}
+
+TEST(CommitFilesTest, RejectsSnapshotsThatAreNotOurs) {
+    // Another writer's append (different row count), a compaction, junk
+    EXPECT_FALSE(commitFilesFromMetadata(kMetadata, 1499));
+    std::string replace(kMetadata);
+    replace.replace(replace.find("append"), 6, "replace");
+    EXPECT_FALSE(commitFilesFromMetadata(replace, 1500));
+    EXPECT_FALSE(commitFilesFromMetadata("{}", 1500));
+    EXPECT_FALSE(commitFilesFromMetadata("not json", 1500));
+}

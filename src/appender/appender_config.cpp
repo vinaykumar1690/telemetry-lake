@@ -113,6 +113,8 @@ AppenderConfig AppenderConfig::fromEnv() {
     optionalEnv("KAFKA_DLQ_TOPIC", config.dlq_topic);
     config.max_poll_interval_ms =
         integerFromEnv("MAX_POLL_INTERVAL_MS", config.max_poll_interval_ms, 10'000, 86'400'000);
+    config.kafka_stats_interval_ms = integerFromEnv(
+        "KAFKA_STATS_INTERVAL_MS", config.kafka_stats_interval_ms, 0, 86'400'000);
 
     config.catalog_uri = requiredEnv("ICEBERG_CATALOG_URI");
     optionalEnv("ICEBERG_WAREHOUSE", config.warehouse);

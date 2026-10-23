@@ -470,6 +470,7 @@ add_test(NAME ObservabilityTest COMMAND observability_test)
 # Appender: DuckDB-independent core, unit-tested on its own
 add_library(appender_core STATIC
   src/appender/appender_config.cpp
+  src/appender/appender_metrics.cpp
   src/appender/dlq_producer.cpp
   src/appender/flow_control.cpp
   src/appender/health.cpp

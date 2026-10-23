@@ -14,6 +14,10 @@
 
 typedef struct rd_kafka_s rd_kafka_t;
 
+namespace obs {
+class KafkaStatsCollector;
+}
+
 namespace appender {
 
 // A Kafka message that can never be decoded, with where it came from
@@ -47,12 +51,21 @@ public:
         std::string appender_id;
         std::chrono::milliseconds delivery_timeout{30'000};
         std::size_t max_message_bytes = std::size_t{32} * 1024 * 1024;
+        int stats_interval_ms = 0;  // librdkafka statistics; 0 disables them
+        std::shared_ptr<obs::KafkaStatsCollector> stats;
     };
+
+    // Name of this client in logs and in the rdkafka_* metrics
+    static constexpr const char* kClient = "appender-dlq";
 
     static Result<std::unique_ptr<KafkaDlqProducer>> create(Options options);
     ~KafkaDlqProducer() override;
 
     Result<void> send(const DlqRecord& record) override;
+
+    // Serves pending callbacks without blocking. send() polls only while it
+    // waits, so this keeps statistics fresh when the DLQ is idle.
+    void poll();
 
 private:
     KafkaDlqProducer(Options options, rd_kafka_t* producer);

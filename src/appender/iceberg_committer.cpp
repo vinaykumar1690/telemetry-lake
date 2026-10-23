@@ -2,9 +2,10 @@
 
 #include "backoff.hpp"
 
+#include "observability/log.hpp"
+
 #include <algorithm>
-#include <format>
-#include <iostream>
+#include <string>
 
 namespace appender {
 
@@ -15,6 +16,7 @@ IcebergCommitter::IcebergCommitter(StagingSource& source, IcebergSink& sink, Off
       sink_(sink),
       store_(store),
       options_(options),
+      metrics_(options_.metrics ? options_.metrics : AppenderMetrics::standalone()),
       on_committed_(std::move(on_committed)),
       on_fatal_(std::move(on_fatal)),
       last_maintenance_(std::chrono::steady_clock::now()) {}
@@ -68,6 +70,7 @@ void IcebergCommitter::discard(const std::set<std::int32_t>& partitions) {
     std::vector<SealedBuffer> dropped;
     {
         std::lock_guard lock(mutex_);
+        for (auto p : partitions) last_committed_ts_ms_.erase(p);
         auto [first, last] = std::ranges::remove_if(
             pending_, [&](const SealedBuffer& b) { return partitions.contains(b.partition); });
         dropped.assign(std::make_move_iterator(first), std::make_move_iterator(last));
@@ -85,6 +88,11 @@ void IcebergCommitter::include(const std::set<std::int32_t>& partitions) {
 CommitterStats IcebergCommitter::stats() const {
     std::lock_guard lock(mutex_);
     return stats_;
+}
+
+std::map<std::int32_t, std::int64_t> IcebergCommitter::lastCommittedTimestamps() const {
+    std::lock_guard lock(mutex_);
+    return last_committed_ts_ms_;
 }
 
 bool IcebergCommitter::dueLocked(std::chrono::steady_clock::time_point now) const {
@@ -169,8 +177,9 @@ bool IcebergCommitter::dropLanded(std::map<std::int32_t, std::int64_t>& committe
         source_.dropSealed(buffer);
     }
     if (!landed.empty()) {
-        std::cout << std::format("Iceberg commit had landed despite the error ({} buffers)\n",
-                                 landed.size());
+        metrics_->commit_landed_after_error.Increment();
+        obs::info("committer", "Iceberg commit had landed despite the error",
+                  {{"buffers", landed.size()}});
     }
     return true;
 }
@@ -186,8 +195,13 @@ void IcebergCommitter::cycle() {
         flush_requests_.clear();
         auto sealed = source_.sealAll(excluded_);
         if (!sealed) {
-            std::cerr << std::format("Sealing staged data failed: {}\n", sealed.error().message);
+            obs::error("committer", "sealing staged data failed", {{"error", sealed.error().message}});
         } else {
+            for (const auto& buffer : *sealed) {
+                metrics_->buffers_sealed.Increment();
+                metrics_->sealed_buffer_rows.Observe(static_cast<double>(buffer.rows));
+                metrics_->sealed_buffer_bytes.Observe(static_cast<double>(buffer.bytes));
+            }
             std::ranges::move(*sealed, std::back_inserter(pending_));
         }
         in_flight_.clear();
@@ -197,6 +211,8 @@ void IcebergCommitter::cycle() {
     std::map<std::int32_t, std::int64_t> committed;
     std::optional<AppenderError> failure;
     std::size_t rows = 0;
+    std::vector<SealedBuffer> landed_batch;  // what the successful attempt committed
+    bool attempted = false;
     const auto started = std::chrono::steady_clock::now();
 
     for (int attempt = 0; attempt < options_.commit_retries; ++attempt) {
@@ -207,6 +223,7 @@ void IcebergCommitter::cycle() {
             // A revoke must not wait out the whole retry chain
             if (wake_.wait_for(lock, delay, [&] { return interruptedLocked(); })) {
                 failure = AppenderError{ErrorKind::Retryable, "commit interrupted by a revoke"};
+                metrics_->countAttempt("interrupted");
                 break;
             }
         }
@@ -220,6 +237,7 @@ void IcebergCommitter::cycle() {
             AppenderError error;
             if (!dropLanded(committed, error)) {
                 failure = std::move(error);
+                metrics_->countAttempt("verify_failed");
                 continue;
             }
         }
@@ -233,9 +251,12 @@ void IcebergCommitter::cycle() {
             break;
         }
 
+        attempted = true;
         auto result = sink_.commit(batch, {std::chrono::system_clock::now()});
         if (result) {
             failure.reset();
+            metrics_->countAttempt("ok");
+            landed_batch = batch;
             for (const auto& buffer : batch) {
                 auto& offset = committed[buffer.partition];
                 offset = std::max(offset, buffer.max_offset);
@@ -250,8 +271,10 @@ void IcebergCommitter::cycle() {
         }
 
         failure = result.error();
-        std::cerr << std::format("Iceberg commit attempt {}/{} failed ({}): {}\n", attempt + 1,
-                                 options_.commit_retries, toString(failure->kind), failure->message);
+        metrics_->countAttempt(std::string(toString(failure->kind)));
+        obs::warn("committer", "Iceberg commit attempt failed",
+                  {{"attempt", attempt + 1}, {"max_attempts", options_.commit_retries},
+                   {"kind", toString(failure->kind)}, {"error", failure->message}});
         if (failure->kind == ErrorKind::Fatal) break;
         if (failure->kind == ErrorKind::Indeterminate) {
             std::lock_guard lock(mutex_);
@@ -262,6 +285,10 @@ void IcebergCommitter::cycle() {
     if (!committed.empty()) reportCommitted(committed);
 
     const auto now = std::chrono::steady_clock::now();
+    if (attempted || failure) {
+        metrics_->commit_duration.Observe(std::chrono::duration<double>(now - started).count());
+    }
+    if (!landed_batch.empty()) recordCommit(landed_batch, rows, now - started);
     bool became_fatal = false;
     {
         std::lock_guard lock(mutex_);
@@ -299,10 +326,67 @@ void IcebergCommitter::cycle() {
         now - last_maintenance_ >= options_.maintenance_interval) {
         last_maintenance_ = now;
         if (auto pruned = store_.prune(); !pruned) {
-            std::cerr << std::format("Offsets table maintenance failed: {}\n",
-                                     pruned.error().message);
+            metrics_->countMaintenance("failed");
+            obs::warn("committer", "offsets table maintenance failed",
+                      {{"error", pruned.error().message}});
+        } else {
+            metrics_->countMaintenance("ok");
         }
     }
+}
+
+void IcebergCommitter::recordCommit(const std::vector<SealedBuffer>& batch, std::size_t rows,
+                                    std::chrono::steady_clock::duration duration) {
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    std::set<std::int32_t> partitions;
+    std::size_t bytes = 0;
+    std::int64_t oldest_ts_ms = -1;
+    {
+        std::lock_guard lock(mutex_);
+        for (const auto& buffer : batch) {
+            partitions.insert(buffer.partition);
+            bytes += buffer.bytes;
+            if (buffer.min_kafka_ts_ms >= 0) {
+                metrics_->end_to_end_latency.Observe(
+                    static_cast<double>(std::max<std::int64_t>(now_ms - buffer.min_kafka_ts_ms, 0)) / 1e3);
+                oldest_ts_ms = oldest_ts_ms < 0 ? buffer.min_kafka_ts_ms
+                                                : std::min(oldest_ts_ms, buffer.min_kafka_ts_ms);
+            }
+            if (buffer.max_kafka_ts_ms >= 0 && !excluded_.contains(buffer.partition)) {
+                auto& last = last_committed_ts_ms_[buffer.partition];
+                last = std::max(last, buffer.max_kafka_ts_ms);
+            }
+        }
+    }
+    metrics_->commit_buffers.Observe(static_cast<double>(batch.size()));
+    metrics_->commit_partitions.Observe(static_cast<double>(partitions.size()));
+    metrics_->committed_payload_bytes.Increment(static_cast<double>(bytes));
+
+    // Offsets-only commits (poison or empty messages) add no data files
+    std::optional<CommitFiles> files;
+    if (rows > 0) {
+        files = sink_.lastCommitFiles(rows);
+        if (files) {
+            metrics_->data_files_committed.Increment(static_cast<double>(files->added_data_files));
+            metrics_->data_files_per_commit.Observe(static_cast<double>(files->added_data_files));
+            if (files->total_data_files) {
+                metrics_->table_data_files.Set(static_cast<double>(*files->total_data_files));
+            }
+        } else {
+            metrics_->commit_files_unknown.Increment();
+        }
+    }
+
+    obs::info("committer", "Iceberg commit",
+              {{"rows", rows},
+               {"bytes", bytes},
+               {"buffers", batch.size()},
+               {"partitions", partitions.size()},
+               {"data_files", files ? std::to_string(files->added_data_files) : std::string("unknown")},
+               {"duration_ms", std::chrono::duration_cast<std::chrono::milliseconds>(duration).count()},
+               {"oldest_message_age_ms", oldest_ts_ms < 0 ? std::int64_t{-1} : now_ms - oldest_ts_ms}});
 }
 
 void IcebergCommitter::reportCommitted(const std::map<std::int32_t, std::int64_t>& offsets) {

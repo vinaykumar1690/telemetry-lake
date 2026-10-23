@@ -35,13 +35,14 @@ Work makeWork(std::int32_t partition, std::int64_t offset, std::string payload) 
 class FakeWriter : public PartitionWriter {
 public:
     Result<void> append(std::span<const LogRow> rows, std::int64_t max_offset,
-                        std::size_t) override {
+                        std::size_t, std::int64_t kafka_ts_ms = -1) override {
         std::lock_guard lock(mutex);
         if (failures_left > 0) {
             --failures_left;
             return std::unexpected(AppenderError{failure_kind, "staging down"});
         }
         offsets.push_back(max_offset);
+        timestamps.push_back(kafka_ts_ms);
         row_count += rows.size();
         return {};
     }
@@ -58,6 +59,7 @@ public:
     std::mutex mutex;
     std::vector<std::int64_t> offsets;  // every offset the partition moved to, in order
     std::vector<std::int64_t> advanced;
+    std::vector<std::int64_t> timestamps;  // Kafka timestamp passed with each append
     std::size_t row_count = 0;
     int failures_left = 0;
     ErrorKind failure_kind = ErrorKind::Retryable;
@@ -301,4 +303,28 @@ TEST(PipelinePoolTest, UnassignedPartitionIsIgnored) {
     ASSERT_TRUE(pool.tryRoute(work));
     pool.stop();
     EXPECT_EQ(pool.stats().messages, 0u);
+}
+
+TEST(PipelinePoolTest, Metrics) {
+    FakeStaging staging;
+    auto p0 = staging.add(0);
+    FakeDlq dlq;
+    auto opts = options(1);
+    opts.metrics = AppenderMetrics::standalone();
+    PipelinePool pool(opts, staging, dlq, nullptr);
+    pool.start();
+    auto good = makeWork(0, 1, logsPayload(2));
+    good.kafka_ts_ms = 1'700'000'000'000;
+    const auto good_bytes = good.payload.size();
+    ASSERT_TRUE(pool.tryRoute(good));
+    auto poison = makeWork(0, 2, "not a wrapper");
+    ASSERT_TRUE(pool.tryRoute(poison));
+    pool.stop();
+
+    const auto& m = *opts.metrics;
+    EXPECT_EQ(m.consumed_bytes.Value(), good_bytes + std::string("not a wrapper").size());
+    EXPECT_EQ(m.dlq_sent_bytes.Value(), std::string("not a wrapper").size());
+    EXPECT_EQ(m.process_duration.Collect().histogram.sample_count, 1u);  // staged messages only
+    EXPECT_EQ(p0->timestamps, std::vector<std::int64_t>{1'700'000'000'000});
+    EXPECT_EQ(pool.queueBytes(), std::vector<std::size_t>{0});
 }

@@ -26,6 +26,10 @@ public:
 
     Result<void> commit(std::span<const SealedBuffer> buffers, const CommitContext& context) override;
 
+    // Reads the logs table's current snapshot summary from the catalog (one
+    // loadTable request)
+    std::optional<CommitFiles> lastCommitFiles(std::size_t rows) override;
+
 private:
     std::unique_ptr<duckdb::Connection> conn_;
     TableNames tables_;
@@ -49,6 +53,10 @@ private:
     std::string topic_;
     std::optional<bool> rewrite_available_;
 };
+
+// Files of the current snapshot in an Iceberg table-metadata document, if
+// that snapshot is an append of exactly `rows` rows (i.e. ours); exposed for tests
+std::optional<CommitFiles> commitFilesFromMetadata(std::string_view metadata_json, std::size_t rows);
 
 // SQL text for one commit; exposed for tests
 std::string buildCommitSql(std::span<const SealedBuffer> buffers, const TableNames& tables,

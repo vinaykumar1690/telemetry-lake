@@ -51,13 +51,14 @@ TEST(KafkaStats, ConsumerLagIsPositionBased) {
     EXPECT_EQ(text.find("rdkafka_producer_queue_messages"), std::string::npos);
 }
 
-TEST(KafkaStats, HighWatermarks) {
+TEST(KafkaStats, Watermarks) {
     obs::KafkaStatsCollector collector;
     ASSERT_TRUE(collector.update("appender-consumer", fixture("consumer_stats.json")));
-    const auto marks = collector.highWatermarks("appender-consumer", "e2e-logs");
-    EXPECT_EQ(marks, (std::map<std::int32_t, std::int64_t>{{0, 45}, {1, 3}, {2, 0}, {3, 2}}));
-    EXPECT_TRUE(collector.highWatermarks("appender-consumer", "other").empty());
-    EXPECT_TRUE(collector.highWatermarks("nobody", "e2e-logs").empty());
+    const auto marks = collector.watermarks("appender-consumer", "e2e-logs");
+    EXPECT_EQ(marks, (std::map<std::int32_t, obs::Watermarks>{
+                         {0, {0, 45}}, {1, {0, 3}}, {2, {0, 0}}, {3, {0, 2}}}));
+    EXPECT_TRUE(collector.watermarks("appender-consumer", "other").empty());
+    EXPECT_TRUE(collector.watermarks("nobody", "e2e-logs").empty());
 }
 
 TEST(KafkaStats, ProducerAndConsumerShareFamilies) {
