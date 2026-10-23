@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "ingester/http_server.hpp"
+#include "ingester/ingester_metrics.hpp"
 #include "crow.h"
 #include <zlib.h>
 #include <memory>
@@ -590,4 +591,57 @@ TEST_F(HttpServerTest, ReadyReturns503WithoutProducer) {
     crow::response res;
     app.handle_full(req, res);
     EXPECT_EQ(res.code, 503);
+}
+
+// Metrics: every response path is counted, rejects carry their reason, and
+// bytes are counted as received and after decompression
+TEST_F(HttpServerLimitsTest, CountsRequestsBytesAndRejects) {
+    HttpServerOptions options;
+    options.max_body_bytes = 64;
+    configure(options);
+    auto& m = server->metrics();
+
+    const std::string payload(40, 'x');
+    const std::string gzipped = compressGzip(payload);
+    EXPECT_EQ(post(payload, "application/x-protobuf").code, 200);
+    EXPECT_EQ(post(gzipped, "application/json", "gzip").code, 200);
+    EXPECT_EQ(post("{}", "text/plain").code, 415);
+    EXPECT_EQ(post("{}", "application/json", "br").code, 415);
+    EXPECT_EQ(post(std::string(65, 'x'), "application/json").code, 413);
+    EXPECT_EQ(post("not gzip", "application/json", "gzip").code, 400);
+
+    auto requests = [&](const char* code) {
+        return m.requests.Add({{"route", "/v1/logs"}, {"code", code}}).Value();
+    };
+    EXPECT_EQ(requests("200"), 2);
+    EXPECT_EQ(requests("415"), 2);
+    EXPECT_EQ(requests("413"), 1);
+    EXPECT_EQ(requests("400"), 1);
+
+    auto rejected = [&](const char* reason) { return m.rejected.Add({{"reason", reason}}).Value(); };
+    EXPECT_EQ(rejected("unsupported_media_type"), 1);
+    EXPECT_EQ(rejected("unsupported_encoding"), 1);
+    EXPECT_EQ(rejected("too_large"), 1);
+    EXPECT_EQ(rejected("bad_gzip"), 1);
+
+    EXPECT_EQ(m.received_identity_bytes.Value(), 40);
+    EXPECT_EQ(m.received_gzip_bytes.Value(), gzipped.size() + std::string("not gzip").size());
+    EXPECT_EQ(m.payload_protobuf_bytes.Value(), 40);
+    EXPECT_EQ(m.payload_json_bytes.Value(), 40);
+    EXPECT_EQ(m.logs_in_flight.Value(), 0);
+
+    const auto duration = m.logs_duration.Collect().histogram;
+    EXPECT_EQ(duration.sample_count, 6u);
+    EXPECT_EQ(m.payload_size.Collect().histogram.sample_count, 2u);
+}
+
+TEST_F(HttpServerTest, CountsProbes) {
+    for (const char* url : {"/health", "/ready"}) {
+        crow::request req;
+        req.url = url;
+        crow::response res;
+        app.handle_full(req, res);
+    }
+    EXPECT_EQ(server.metrics().requests.Add({{"route", "/health"}, {"code", "200"}}).Value(), 1);
+    EXPECT_EQ(server.metrics().requests.Add({{"route", "/ready"}, {"code", "503"}}).Value(), 1);
 }

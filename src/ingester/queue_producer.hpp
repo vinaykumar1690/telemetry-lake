@@ -6,7 +6,13 @@
 #include <librdkafka/rdkafka.h>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <thread>
+
+struct IngesterMetrics;
+namespace obs {
+class KafkaStatsCollector;
+}
 
 enum class ProduceResult {
     SUCCESS,
@@ -16,27 +22,43 @@ enum class ProduceResult {
     RETRYABLE_ERROR    // Transient, e.g. topic metadata not yet known (503)
 };
 
-// Delivery report callback state. librdkafka invokes dr_cb from rd_kafka_poll()/
-// rd_kafka_flush(), i.e. on QueueProducer's poll thread.
-class DeliveryReportCb {
+// State of the librdkafka callbacks (the producer's opaque). librdkafka invokes
+// dr_cb, stats_cb and error_cb from rd_kafka_poll()/rd_kafka_flush(), i.e. on
+// QueueProducer's poll thread; log_cb may run on its internal threads.
+class ProducerCallbacks {
 public:
-    DeliveryReportCb(std::atomic<int>* in_flight_count, std::atomic<uint64_t>* delivery_failures)
-        : in_flight_count_(in_flight_count), delivery_failures_(delivery_failures) {}
+    ProducerCallbacks(std::atomic<int>* in_flight_count, std::atomic<uint64_t>* delivery_failures,
+                      IngesterMetrics* metrics, obs::KafkaStatsCollector* stats)
+        : in_flight_count_(in_flight_count),
+          delivery_failures_(delivery_failures),
+          metrics_(metrics),
+          stats_(stats) {}
 
     static void dr_cb(rd_kafka_t* rk, const rd_kafka_message_t* rkmessage, void* opaque);
+    static int stats_cb(rd_kafka_t* rk, char* json, size_t json_len, void* opaque);
+    static void error_cb(rd_kafka_t* rk, int err, const char* reason, void* opaque);
+    static void log_cb(const rd_kafka_t* rk, int level, const char* fac, const char* buf);
+
+    // Name of this client in logs and in the rdkafka_* metrics
+    static constexpr const char* kClient = "ingester";
 
 private:
-    // Logs at most once per second so a broker outage cannot flood stderr
+    // Logs at most once per second so a broker outage cannot flood the log
     void logFailureRateLimited(rd_kafka_resp_err_t err, uint64_t total_failures);
 
     std::atomic<int>* in_flight_count_;
     std::atomic<uint64_t>* delivery_failures_;
+    IngesterMetrics* metrics_;
+    obs::KafkaStatsCollector* stats_;
     std::atomic<int64_t> last_log_ns_{0};
 };
 
 class QueueProducer {
 public:
-    explicit QueueProducer(const IngesterConfig& config);
+    // metrics and stats are optional (tests); both must outlive the producer
+    explicit QueueProducer(const IngesterConfig& config,
+                           std::shared_ptr<IngesterMetrics> metrics = nullptr,
+                           std::shared_ptr<obs::KafkaStatsCollector> stats = nullptr);
     ~QueueProducer();
 
     QueueProducer(const QueueProducer&) = delete;
@@ -71,12 +93,14 @@ public:
 
 private:
     IngesterConfig config_;
+    std::shared_ptr<IngesterMetrics> metrics_;
+    std::shared_ptr<obs::KafkaStatsCollector> stats_;
     std::atomic<int> in_flight_count_{0};
     std::atomic<uint64_t> delivery_failures_{0};
 
     rd_kafka_t* producer_ = nullptr;
     rd_kafka_topic_t* topic_ = nullptr;
-    DeliveryReportCb delivery_cb_;
+    ProducerCallbacks callbacks_;
 
     // Serves delivery callbacks continuously. Without it callbacks only run when
     // something else polls, so in_flight_count_ could stop draining.

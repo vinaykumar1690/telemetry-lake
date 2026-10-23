@@ -49,6 +49,8 @@ struct IngesterConfig {
     int acks = -1;  // -1 means all replicas must acknowledge
     std::string compression_type = "snappy";
     int retry_backoff_ms = 100;
+    // librdkafka statistics (rdkafka_* metrics); 0 disables them
+    int kafka_stats_interval_ms = 15'000;
 
     // HTTP server
     std::string http_host = "0.0.0.0";
@@ -58,6 +60,10 @@ struct IngesterConfig {
     // Each accepted payload becomes one Kafka message; the producer's
     // message.max.bytes is derived from these limits (see kafkaMessageMaxBytes)
     std::size_t max_decompressed_bytes = 16 * 1024 * 1024;
+
+    // Prometheus /metrics, on its own port: the HTTP port is reachable
+    // through the UI's /api/ingest/ proxy
+    std::uint16_t metrics_port = 9464;
 
     // Room for the RawTelemetryMessage wrapper fields and Kafka record overhead
     static constexpr std::size_t kKafkaMessageOverheadBytes = 64 * 1024;
@@ -88,6 +94,8 @@ struct IngesterConfig {
 
         config.max_in_flight = integerFromEnv("MAX_IN_FLIGHT", config.max_in_flight, 1, 10'000'000);
         config.acks = integerFromEnv("PRODUCER_ACKS", config.acks, -1, 1000);
+        config.kafka_stats_interval_ms = integerFromEnv(
+            "KAFKA_STATS_INTERVAL_MS", config.kafka_stats_interval_ms, 0, 86'400'000);
 
         const char* compression = std::getenv("PRODUCER_COMPRESSION");
         if (compression) {
@@ -98,6 +106,7 @@ struct IngesterConfig {
             config.http_host = host;
         }
         config.http_port = integerFromEnv<std::uint16_t>("HTTP_PORT", config.http_port, 1, 65535);
+        config.metrics_port = integerFromEnv<std::uint16_t>("METRICS_PORT", config.metrics_port, 1, 65535);
         config.http_threads = integerFromEnv("HTTP_THREADS", config.http_threads, 0u, 1024u);
         config.max_body_bytes = integerFromEnv<std::size_t>(
             "MAX_BODY_BYTES", config.max_body_bytes, 1, kMaxPayloadLimitBytes);

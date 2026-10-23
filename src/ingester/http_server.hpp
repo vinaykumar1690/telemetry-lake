@@ -7,7 +7,12 @@
 #include <string>
 #include "crow.h"
 
+namespace prometheus {
+class Registry;
+}
+
 class QueueProducer;
+struct IngesterMetrics;
 
 struct HttpServerOptions {
     std::string host = "0.0.0.0";
@@ -27,10 +32,12 @@ struct HttpServerOptions {
 class HttpServer {
 public:
     // Without a producer, accepted payloads are discarded and /ready reports 503
-    // (used by tests)
+    // (used by tests). Without metrics the server keeps its own, unexported.
     HttpServer();
     explicit HttpServer(std::shared_ptr<QueueProducer> queue_producer,
-                        HttpServerOptions options = {});
+                        HttpServerOptions options = {},
+                        std::shared_ptr<IngesterMetrics> metrics = nullptr);
+    ~HttpServer();
 
     // Bind to options.host:options.port and serve until SIGINT/SIGTERM
     void start();
@@ -38,9 +45,13 @@ public:
     // Setup routes on the provided app (for testing)
     void setupRoutes(crow::SimpleApp& app);
 
+    IngesterMetrics& metrics() { return *metrics_; }
+
 private:
     std::shared_ptr<QueueProducer> queue_producer_;
     HttpServerOptions options_;
+    std::shared_ptr<prometheus::Registry> own_registry_;  // when no metrics were passed
+    std::shared_ptr<IngesterMetrics> metrics_;
 };
 
 #endif // HTTP_SERVER_HPP

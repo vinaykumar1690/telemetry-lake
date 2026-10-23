@@ -1,11 +1,13 @@
 #include "http_server.hpp"
+#include "ingester_metrics.hpp"
 #include "queue_producer.hpp"
+#include "observability/log.hpp"
 #include "crow.h"
+#include <prometheus/registry.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <expected>
-#include <format>
-#include <iostream>
 #include <limits>
 #include <span>
 #include <string_view>
@@ -189,103 +191,148 @@ crow::response unavailableResponse(const MediaType& media) {
                          "Service Unavailable: queue is at capacity, retry later");
 }
 
+crow::response handleLogs(const crow::request& req, QueueProducer* queue_producer,
+                          const HttpServerOptions& options, IngesterMetrics& metrics) {
+    auto reject = [&](const char* reason, crow::response res) {
+        metrics.countRejected(reason);
+        return res;
+    };
+
+    if (req.body.size() > options.max_body_bytes) {
+        return reject("too_large", errorResponse(kDefaultMediaType, 413, kGrpcInvalidArgument,
+                                                 "Payload Too Large"));
+    }
+
+    // Validate content type (but don't parse - defer to consumer)
+    const MediaType* media = findMediaType(req.get_header_value("Content-Type"));
+    if (!media) {
+        return reject("unsupported_media_type",
+                      errorResponse(kDefaultMediaType, 415, kGrpcInvalidArgument,
+                                    "Unsupported Media Type"));
+    }
+
+    const std::string_view encoding = trimOws(req.get_header_value("Content-Encoding"));
+    const bool gzip = isOneOf(encoding, kGzipEncodings);
+    if (!gzip && !isOneOf(encoding, kIdentityEncodings)) {
+        return reject("unsupported_encoding", errorResponse(*media, 415, kGrpcInvalidArgument,
+                                                            "Unsupported Content-Encoding"));
+    }
+    (gzip ? metrics.received_gzip_bytes : metrics.received_identity_bytes)
+        .Increment(static_cast<double>(req.body.size()));
+
+    // Shed load before spending CPU on decompression
+    if (queue_producer && queue_producer->isAtCapacity()) {
+        return reject("queue_full", unavailableResponse(*media));
+    }
+
+    // Create wrapper message with raw (decompressed) payload
+    telemetry::v1::RawTelemetryMessage wrapper;
+    wrapper.set_content_type(std::string(media->name));
+    wrapper.set_telemetry_type(telemetry::v1::OTEL_LOGS);
+    if (gzip) {
+        auto decompressed = decompressGzip(req.body, options.max_decompressed_bytes);
+        if (!decompressed) {
+            switch (decompressed.error()) {
+                case DecodeError::TooLarge:
+                    return reject("too_large_decompressed",
+                                  errorResponse(*media, 413, kGrpcInvalidArgument,
+                                                "Payload Too Large after decompression"));
+                case DecodeError::Corrupt:
+                    return reject("bad_gzip", errorResponse(*media, 400, kGrpcInvalidArgument,
+                                                            "Failed to decompress gzip payload"));
+            }
+            std::unreachable();
+        }
+        wrapper.set_payload(std::move(*decompressed));
+    } else {
+        wrapper.set_payload(req.body);
+    }
+    const auto payload_bytes = static_cast<double>(wrapper.payload().size());
+
+    auto accepted = [&] {
+        (media->wire == Wire::Json ? metrics.payload_json_bytes : metrics.payload_protobuf_bytes)
+            .Increment(payload_bytes);
+        metrics.payload_size.Observe(payload_bytes);
+        return okResponse(*media);
+    };
+
+    // Without a producer (tests only; main() exits instead), accept and discard
+    if (!queue_producer) {
+        return accepted();
+    }
+
+    switch (queue_producer->produce(wrapper)) {
+        case ProduceResult::SUCCESS:
+            return accepted();
+        case ProduceResult::QUEUE_FULL:
+            return reject("queue_full", unavailableResponse(*media));
+        case ProduceResult::RETRYABLE_ERROR:
+            return reject("queue_retryable",
+                          errorResponse(*media, 503, kGrpcUnavailable,
+                                        "Service Unavailable: queue error, retry later"));
+        case ProduceResult::PAYLOAD_TOO_LARGE:
+            return reject("queue_too_large", errorResponse(*media, 413, kGrpcInvalidArgument,
+                                                           "Payload Too Large for queue"));
+        case ProduceResult::PERSISTENT_ERROR:
+            return reject("produce_error",
+                          errorResponse(*media, 500, kGrpcInternal,
+                                        "Internal Server Error: failed to queue message"));
+    }
+    std::unreachable();
+}
+
 }  // namespace
 
-HttpServer::HttpServer() = default;
+HttpServer::HttpServer() : HttpServer(nullptr) {}
 
-HttpServer::HttpServer(std::shared_ptr<QueueProducer> queue_producer, HttpServerOptions options)
-    : queue_producer_(std::move(queue_producer)), options_(std::move(options)) {}
+HttpServer::HttpServer(std::shared_ptr<QueueProducer> queue_producer, HttpServerOptions options,
+                       std::shared_ptr<IngesterMetrics> metrics)
+    : queue_producer_(std::move(queue_producer)),
+      options_(std::move(options)),
+      metrics_(std::move(metrics)) {
+    if (!metrics_) {
+        own_registry_ = std::make_shared<prometheus::Registry>();
+        metrics_ = std::make_shared<IngesterMetrics>(*own_registry_);
+    }
+}
+
+HttpServer::~HttpServer() = default;
 
 void HttpServer::setupRoutes(crow::SimpleApp& app) {
     auto queue_producer = queue_producer_;  // Capture for lambda
     const auto options = options_;
+    auto metrics = metrics_;
 
     // Health check endpoint for Kubernetes liveness probe
     CROW_ROUTE(app, "/health")
-        ([](){
+        ([metrics](){
+            metrics->countRequest("/health", 200);
             return crow::response(200, "OK");
         });
 
     // Readiness check endpoint for Kubernetes readiness probe
     CROW_ROUTE(app, "/ready")
-        ([queue_producer](){
+        ([queue_producer, metrics](){
             // Not ready without a working producer: accepted data would be dropped
             if (!queue_producer || !queue_producer->isReady()) {
+                metrics->countRequest("/ready", 503);
                 return crow::response(503, "Queue producer not ready");
             }
+            metrics->countRequest("/ready", 200);
             return crow::response(200, "OK");
         });
 
     CROW_ROUTE(app, "/v1/logs")
         .methods("POST"_method)
-        ([queue_producer, options](const crow::request& req){
-            if (req.body.size() > options.max_body_bytes) {
-                return errorResponse(kDefaultMediaType, 413, kGrpcInvalidArgument,
-                                     "Payload Too Large");
-            }
-
-            // Validate content type (but don't parse - defer to consumer)
-            const MediaType* media = findMediaType(req.get_header_value("Content-Type"));
-            if (!media) {
-                return errorResponse(kDefaultMediaType, 415, kGrpcInvalidArgument,
-                                     "Unsupported Media Type");
-            }
-
-            const std::string_view encoding = trimOws(req.get_header_value("Content-Encoding"));
-            const bool gzip = isOneOf(encoding, kGzipEncodings);
-            if (!gzip && !isOneOf(encoding, kIdentityEncodings)) {
-                return errorResponse(*media, 415, kGrpcInvalidArgument,
-                                     "Unsupported Content-Encoding");
-            }
-
-            // Shed load before spending CPU on decompression
-            if (queue_producer && queue_producer->isAtCapacity()) {
-                return unavailableResponse(*media);
-            }
-
-            // Create wrapper message with raw (decompressed) payload
-            telemetry::v1::RawTelemetryMessage wrapper;
-            wrapper.set_content_type(std::string(media->name));
-            wrapper.set_telemetry_type(telemetry::v1::OTEL_LOGS);
-            if (gzip) {
-                auto decompressed = decompressGzip(req.body, options.max_decompressed_bytes);
-                if (!decompressed) {
-                    switch (decompressed.error()) {
-                        case DecodeError::TooLarge:
-                            return errorResponse(*media, 413, kGrpcInvalidArgument,
-                                                 "Payload Too Large after decompression");
-                        case DecodeError::Corrupt:
-                            return errorResponse(*media, 400, kGrpcInvalidArgument,
-                                                 "Failed to decompress gzip payload");
-                    }
-                    std::unreachable();
-                }
-                wrapper.set_payload(std::move(*decompressed));
-            } else {
-                wrapper.set_payload(req.body);
-            }
-
-            // Without a producer (tests only; main() exits instead), accept and discard
-            if (!queue_producer) {
-                return okResponse(*media);
-            }
-
-            switch (queue_producer->produce(wrapper)) {
-                case ProduceResult::SUCCESS:
-                    return okResponse(*media);
-                case ProduceResult::QUEUE_FULL:
-                    return unavailableResponse(*media);
-                case ProduceResult::RETRYABLE_ERROR:
-                    return errorResponse(*media, 503, kGrpcUnavailable,
-                                         "Service Unavailable: queue error, retry later");
-                case ProduceResult::PAYLOAD_TOO_LARGE:
-                    return errorResponse(*media, 413, kGrpcInvalidArgument,
-                                         "Payload Too Large for queue");
-                case ProduceResult::PERSISTENT_ERROR:
-                    return errorResponse(*media, 500, kGrpcInternal,
-                                         "Internal Server Error: failed to queue message");
-            }
-            std::unreachable();
+        ([queue_producer, options, metrics](const crow::request& req){
+            const auto started = std::chrono::steady_clock::now();
+            metrics->logs_in_flight.Increment();
+            crow::response res = handleLogs(req, queue_producer.get(), options, *metrics);
+            metrics->logs_in_flight.Decrement();
+            metrics->logs_duration.Observe(
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+            metrics->countRequest("/v1/logs", res.code);
+            return res;
         });
 }
 
@@ -303,7 +350,7 @@ void HttpServer::start() {
         app.multithreaded();
     }
 
-    std::cout << std::format("OTel Log Receiver is running at http://{}:{}\n",
-                             options_.host, options_.port);
+    obs::info("http", "OTLP/HTTP receiver listening",
+              {{"host", options_.host}, {"port", options_.port}});
     app.run();
 }

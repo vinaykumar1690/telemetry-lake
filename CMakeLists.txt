@@ -411,7 +411,8 @@ target_compile_definitions(observability_test PRIVATE
   OBS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/observability/data")
 
 # Create executable
-add_executable(otel_receiver src/main.cpp src/ingester/http_server.cpp src/config.cpp src/ingester/queue_producer.cpp)
+add_executable(otel_receiver src/main.cpp src/ingester/http_server.cpp src/ingester/ingester_metrics.cpp
+  src/config.cpp src/ingester/queue_producer.cpp)
 
 # Link libraries
 target_link_libraries(otel_receiver PUBLIC
@@ -435,8 +436,9 @@ target_include_directories(otel_receiver PRIVATE
 # Create test executable
 enable_testing()
 add_executable(http_server_test 
-  tests/test_http_server.cpp 
-  src/ingester/http_server.cpp 
+  tests/test_http_server.cpp
+  src/ingester/http_server.cpp
+  src/ingester/ingester_metrics.cpp
   src/ingester/queue_producer.cpp
   src/config.cpp
 )

@@ -1,39 +1,69 @@
 #include "queue_producer.hpp"
+#include "ingester_metrics.hpp"
+#include "observability/kafka_stats.hpp"
+#include "observability/log.hpp"
 #include "telemetry_wrapper.pb.h"
 #include <chrono>
 #include <cstdlib>
-#include <format>
-#include <iostream>
 #include <string>
 #include <utility>
 #include <librdkafka/rdkafka.h>
 
-void DeliveryReportCb::dr_cb(rd_kafka_t* /*rk*/, const rd_kafka_message_t* rkmessage, void* opaque) {
-    auto* cb = static_cast<DeliveryReportCb*>(opaque);
+void ProducerCallbacks::dr_cb(rd_kafka_t* /*rk*/, const rd_kafka_message_t* rkmessage, void* opaque) {
+    auto* cb = static_cast<ProducerCallbacks*>(opaque);
     if (!cb) return;
 
-    if (rkmessage->err != RD_KAFKA_RESP_ERR_NO_ERROR && cb->delivery_failures_) {
-        uint64_t total = cb->delivery_failures_->fetch_add(1) + 1;
-        cb->logFailureRateLimited(rkmessage->err, total);
+    if (rkmessage->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+        if (cb->metrics_) {
+            cb->metrics_->delivery_failures.Add({{"error", rd_kafka_err2name(rkmessage->err)}}).Increment();
+        }
+        if (cb->delivery_failures_) {
+            uint64_t total = cb->delivery_failures_->fetch_add(1) + 1;
+            cb->logFailureRateLimited(rkmessage->err, total);
+        }
+    } else if (cb->metrics_) {
+        // Microseconds since produce(), measured by librdkafka
+        cb->metrics_->delivery_latency.Observe(
+            static_cast<double>(rd_kafka_message_latency(rkmessage)) / 1e6);
     }
     if (cb->in_flight_count_) {
         cb->in_flight_count_->fetch_sub(1);
     }
 }
 
-void DeliveryReportCb::logFailureRateLimited(rd_kafka_resp_err_t err, uint64_t total_failures) {
+int ProducerCallbacks::stats_cb(rd_kafka_t* /*rk*/, char* json, size_t json_len, void* opaque) {
+    auto* cb = static_cast<ProducerCallbacks*>(opaque);
+    if (cb && cb->stats_) cb->stats_->update(kClient, std::string_view(json, json_len));
+    return 0;  // librdkafka frees json
+}
+
+void ProducerCallbacks::error_cb(rd_kafka_t* /*rk*/, int err, const char* reason, void* /*opaque*/) {
+    const auto code = static_cast<rd_kafka_resp_err_t>(err);
+    obs::logKafkaError(kClient, err, rd_kafka_err2name(code), reason,
+                       code == RD_KAFKA_RESP_ERR__FATAL);
+}
+
+void ProducerCallbacks::log_cb(const rd_kafka_t* /*rk*/, int level, const char* fac, const char* buf) {
+    obs::logKafka(kClient, level, fac, buf);
+}
+
+void ProducerCallbacks::logFailureRateLimited(rd_kafka_resp_err_t err, uint64_t total_failures) {
     using namespace std::chrono;
     const int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
     int64_t last = last_log_ns_.load();
     if (now - last < duration_cast<nanoseconds>(seconds(1)).count()) return;
     if (!last_log_ns_.compare_exchange_strong(last, now)) return;
 
-    std::cerr << std::format("Kafka delivery failed: {} (total delivery failures: {})\n",
-                             rd_kafka_err2str(err), total_failures);
+    obs::error("producer", "Kafka delivery failed",
+               {{"error", rd_kafka_err2str(err)}, {"total_failures", total_failures}});
 }
 
-QueueProducer::QueueProducer(const IngesterConfig& config)
-    : config_(config), delivery_cb_(&in_flight_count_, &delivery_failures_)
+QueueProducer::QueueProducer(const IngesterConfig& config, std::shared_ptr<IngesterMetrics> metrics,
+                             std::shared_ptr<obs::KafkaStatsCollector> stats)
+    : config_(config),
+      metrics_(std::move(metrics)),
+      stats_(std::move(stats)),
+      callbacks_(&in_flight_count_, &delivery_failures_, metrics_.get(), stats_.get())
 {
 }
 
@@ -48,7 +78,7 @@ bool QueueProducer::initialize() {
 
     auto set = [&](const char* key, const std::string& value) {
         if (rd_kafka_conf_set(conf, key, value.c_str(), errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
-            std::cerr << std::format("Failed to set {}: {}\n", key, errstr);
+            obs::error("producer", "invalid Kafka producer setting", {{"key", key}, {"error", errstr}});
             return false;
         }
         return true;
@@ -68,27 +98,31 @@ bool QueueProducer::initialize() {
         set("enable.idempotence", "true") &&
         // Must admit the largest payload the HTTP layer accepts, so oversized
         // requests get 413 there instead of failing in librdkafka
-        set("message.max.bytes", std::to_string(config_.kafkaMessageMaxBytes()));
+        set("message.max.bytes", std::to_string(config_.kafkaMessageMaxBytes())) &&
+        set("statistics.interval.ms", std::to_string(config_.kafka_stats_interval_ms));
     if (!configured) {
         rd_kafka_conf_destroy(conf);
         return false;
     }
 
-    rd_kafka_conf_set_dr_msg_cb(conf, DeliveryReportCb::dr_cb);
-    rd_kafka_conf_set_opaque(conf, &delivery_cb_);
+    rd_kafka_conf_set_dr_msg_cb(conf, ProducerCallbacks::dr_cb);
+    rd_kafka_conf_set_stats_cb(conf, ProducerCallbacks::stats_cb);
+    rd_kafka_conf_set_error_cb(conf, ProducerCallbacks::error_cb);
+    rd_kafka_conf_set_log_cb(conf, ProducerCallbacks::log_cb);
+    rd_kafka_conf_set_opaque(conf, &callbacks_);
 
     // On success rd_kafka_new takes ownership of conf
     producer_ = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
     if (!producer_) {
-        std::cerr << std::format("Failed to create producer: {}\n", errstr);
+        obs::error("producer", "failed to create the Kafka producer", {{"error", errstr}});
         rd_kafka_conf_destroy(conf);
         return false;
     }
 
     topic_ = rd_kafka_topic_new(producer_, config_.queue_topic.c_str(), rd_kafka_topic_conf_new());
     if (!topic_) {
-        std::cerr << std::format("Failed to create topic object: {}\n",
-                                 rd_kafka_err2str(rd_kafka_last_error()));
+        obs::error("producer", "failed to create the topic handle",
+                   {{"topic", config_.queue_topic}, {"error", rd_kafka_err2str(rd_kafka_last_error())}});
         rd_kafka_destroy(producer_);
         producer_ = nullptr;
         return false;
@@ -101,8 +135,8 @@ bool QueueProducer::initialize() {
         }
     });
 
-    std::cout << std::format("QueueProducer initialized with brokers: {}, topic: {}\n",
-                             config_.queue_brokers, config_.queue_topic);
+    obs::info("producer", "Kafka producer initialized",
+              {{"brokers", config_.queue_brokers}, {"topic", config_.queue_topic}});
     return true;
 }
 
@@ -123,7 +157,7 @@ ProduceResult QueueProducer::produce(const telemetry::v1::RawTelemetryMessage& m
     }
     if (!message.SerializeToArray(payload, static_cast<int>(size))) {
         std::free(payload);
-        std::cerr << "Failed to serialize RawTelemetryMessage\n";
+        obs::error("producer", "failed to serialize RawTelemetryMessage");
         return ProduceResult::PERSISTENT_ERROR;
     }
 
@@ -139,6 +173,10 @@ ProduceResult QueueProducer::produce(const telemetry::v1::RawTelemetryMessage& m
 
     if (ret == 0) {
         // Delivery callback (on the poll thread) decrements in_flight_count_
+        if (metrics_) {
+            metrics_->produced_messages.Increment();
+            metrics_->produced_bytes.Increment(static_cast<double>(size));
+        }
         return ProduceResult::SUCCESS;
     }
 
@@ -156,7 +194,7 @@ ProduceResult QueueProducer::produce(const telemetry::v1::RawTelemetryMessage& m
         case RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION:
             return ProduceResult::RETRYABLE_ERROR;
         default:
-            std::cerr << std::format("Kafka produce failed: {}\n", rd_kafka_err2str(err));
+            obs::error("producer", "Kafka produce failed", {{"error", rd_kafka_err2str(err)}});
             return ProduceResult::PERSISTENT_ERROR;
     }
 }
@@ -172,8 +210,8 @@ void QueueProducer::shutdown() {
 
     const rd_kafka_resp_err_t err = rd_kafka_flush(producer_, 5000);
     if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-        std::cerr << std::format("Warning: {} messages were not delivered during shutdown\n",
-                                 rd_kafka_outq_len(producer_));
+        obs::warn("producer", "messages were not delivered during shutdown",
+                  {{"messages", rd_kafka_outq_len(producer_)}});
     }
 
     if (topic_) {
