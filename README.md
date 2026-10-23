@@ -170,8 +170,9 @@ In two terminals, each with the environment from step 1 loaded:
 ```bash
 cd build
 ./otel_receiver
-# QueueProducer initialized with brokers: localhost:9092, topic: e2e-logs
-# OTel Log Receiver is running at http://0.0.0.0:4318
+# 2026-10-23T22:24:50.975Z info  producer: Kafka producer initialized brokers=localhost:9092 topic=e2e-logs
+# 2026-10-23T22:24:50.976Z info  main: metrics listening port=9464 path=/metrics
+# 2026-10-23T22:24:50.976Z info  http: OTLP/HTTP receiver listening host=0.0.0.0 port=4318
 ```
 
 ```bash
@@ -185,8 +186,11 @@ The appender commits every `BUFFER_TIME_SECONDS` (60 s by default) or when `BUFF
 
 ```bash
 curl -X POST localhost:8080/flush  # or: kill -USR1 <appender pid>
-curl localhost:8080/metrics        # Prometheus metrics
+curl localhost:8080/metrics        # appender metrics (commit lag, throughput, data files)
+curl localhost:9464/metrics        # ingester metrics
 ```
+
+Logs are text on a terminal and JSON lines otherwise (`LOG_FORMAT=json|text`). Metrics, lag semantics, dashboards and alerts are described in [docs/observability.md](docs/observability.md).
 
 `SIGINT`/`SIGTERM` (Ctrl-C) drains, makes a final commit and exits.
 
@@ -262,6 +266,9 @@ All components are configured via environment variables. The query service's var
 | `HTTP_THREADS` | `0` | HTTP worker threads (0 = one per hardware thread; set to the CPU limit in containers) |
 | `MAX_BODY_BYTES` | `16777216` | Max request body as received; larger requests get 413 |
 | `MAX_DECOMPRESSED_BYTES` | `16777216` | Max payload after gzip decompression; larger payloads get 413 |
+| `METRICS_PORT` | `9464` | Prometheus `/metrics` (kept off the OTLP port, which the UI proxies) |
+| `KAFKA_STATS_INTERVAL_MS` | `15000` | librdkafka statistics for the `rdkafka_*` metrics (0 disables) |
+| `LOG_FORMAT` / `LOG_LEVEL` | text on a terminal, else `json` / `info` | Log output (see [docs/observability.md](docs/observability.md)) |
 
 Invalid numeric values fail startup instead of falling back to 0. The ingester also exits if the Kafka producer cannot be initialized, so the orchestrator restarts it instead of routing traffic to a pod that would drop data.
 
@@ -316,6 +323,8 @@ Also cap the request body at your ingress (for example nginx `client_max_body_si
 | `MAX_POLL_INTERVAL_MS` | `300000` | Kafka `max.poll.interval.ms` |
 | `OFFSETS_MAINTENANCE_INTERVAL_SECONDS` | `3600` | Offsets table pruning (only where DuckDB can compact; 0 disables) |
 | `HEALTH_PORT` | `8080` | `/health`, `/ready`, `POST /flush`, `/metrics` |
+| `KAFKA_STATS_INTERVAL_MS` | `15000` | librdkafka statistics: `rdkafka_*` metrics and the commit lag (0 disables both) |
+| `LOG_FORMAT` / `LOG_LEVEL` | text on a terminal, else `json` / `info` | Log output |
 | `APPENDER_ID` | hostname | Recorded with each offsets row |
 | `DUCKDB_HOME_DIRECTORY` | `/tmp` | Where DuckDB installs its extensions (must be writable) |
 
@@ -381,13 +390,15 @@ cd build
 ctest --output-on-failure
 
 ./http_server_test        # ingester
+./observability_test      # logger, metrics registry, librdkafka statistics
 ./appender_core_test      # appender logic, DuckDB-free
 ./appender_duckdb_test    # staging and the Iceberg commit SQL, against in-memory DuckDB
 ```
 
 | Test binary | Covers |
 |-------------|--------|
-| `http_server_test` | HTTP endpoint handling, status codes, limits, content types, gzip, OTLP error bodies |
+| `http_server_test` | HTTP endpoint handling, status codes, limits, content types, gzip, OTLP error bodies, request metrics |
+| `observability_test` | JSON/text log lines, metrics rendering, librdkafka statistics parsing (captured fixtures) |
 | `appender_core_test` | Config validation, OTLP protobuf/JSON decoding, transformation, bounded queues, backoff, pipeline ordering/poison/backpressure, commit protocol (retries, indeterminate commits, fencing), DLQ headers |
 | `appender_duckdb_test` | Staging round-trips (quotes, backslashes, NUL, invalid UTF-8), generation sealing, atomic two-table commits, offset recovery |
 
@@ -419,7 +430,8 @@ telemetry-lake/
 ├── src/
 │   ├── main.cpp                    # Ingester entry point
 │   ├── config.hpp/cpp              # Ingester configuration
-│   ├── ingester/                   # HTTP server, Kafka producer
+│   ├── observability/              # logger, Prometheus registry, librdkafka statistics
+│   ├── ingester/                   # HTTP server, Kafka producer, metrics
 │   └── appender/                   # Kafka -> Iceberg appender (see docs/design.md)
 │       ├── main.cpp, app.cpp           # wiring, signals, shutdown order
 │       ├── kafka_source.*              # consumer, rebalance, recovery, backpressure
@@ -444,6 +456,7 @@ telemetry-lake/
     ├── design.md                   # architecture and guarantees
     ├── query-design.md             # query service design and roadmap
     ├── integration-testing.md      # local stack and live tests
+    ├── observability.md            # metrics, lag, logs, dashboards and alerts
     └── mac-setup.md                # setting the services up by hand
 ```
 

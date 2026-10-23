@@ -17,6 +17,7 @@ ctest --output-on-failure
 ./http_server_test       # Run single test
 ./appender_core_test     # Appender logic (DuckDB-free, fakes)
 ./appender_duckdb_test   # Staging and commit SQL against in-memory DuckDB
+./observability_test     # Logger, metrics rendering, librdkafka stats parsing
 
 # Query service (Rust, separate Cargo workspace)
 cd query && cargo build && cargo test --workspace
@@ -53,7 +54,16 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 - `otel_appender` (src/appender/): `KafkaSource` (poll thread) → `PipelinePool` (decode/transform/stage) → `StagingRegistry` → `IcebergCommitter` → `DuckdbIcebergSink`; wired in `app.cpp`
 - `otel-query` (query/, Rust): `logquery` (IR, JSON frontend, cursors; no engine dependency) → `planner` (`FieldResolver` field namespace, IR → DataFusion exprs, paginated search) → `logscan` (`LogsTableProvider`/`LogsScanExec`: partitioned Iceberg scan, `LogsScanCodec` for workers) → `query-server` (axum API, `IcebergSource` table cache, read-only SQL, `distributed.rs`: datafusion-distributed handlers, `--worker` mode). DataFusion 55 with iceberg-rust and apache/datafusion-iceberg pinned by git revision (no release supports DF 55 yet); plain EXPLAIN hides distribution, use EXPLAIN ANALYZE. Every frontend must lower to the IR and resolve fields through `FieldResolver`; this keeps adding LogQL a two-way door (docs/query-design.md §3)
 - `ui/` (React, Vite): Search tab (`/v1/search`; facets and histogram via `/v1/sql`) and Generate tab (OTLP/JSON built in the browser, POSTed to the ingester). nginx (`ui/nginx.conf.template`) serves it and proxies `/api/query/` and `/api/ingest/`, resolving upstreams per request, so they must be fully qualified names. Pure logic (`buildRequest.ts`, `facets.ts`, `generate.ts`, `send.ts`) is unit-tested with Vitest
-- Libraries: `appender_core` (DuckDB-free, tested with fakes) and `appender_duckdb`
+- Libraries: `observability` (src/observability/: structured logger, prometheus-cpp registry, librdkafka statistics → `rdkafka_*`), `appender_core` (DuckDB-free, tested with fakes) and `appender_duckdb`
+
+## Observability
+
+Full reference: `docs/observability.md`.
+- Metrics: ingester `:9464/metrics` (`METRICS_PORT`, kept off the OTLP port the UI proxies); appender `/metrics` on `HEALTH_PORT`; counters only, rates via PromQL. Existing `appender_*` names are a dashboard contract; keep them
+- Appender commit lag = librdkafka high watermark − (durable Iceberg offset + 1); librdkafka's own `consumer_lag` counts from committed (hint) offsets, so `rdkafka_consumer_lag_messages` is computed from the position instead
+- Data files per commit come from the logs table's current snapshot summary (`iceberg_load_table_response`, cast `::JSON`, not `::VARCHAR`)
+- Logs: `obs::info/warn/error(component, msg, {fields})`, JSON lines when stdout is not a TTY; never log per message on hot paths (count it in a metric)
+- Helm (`observability.enabled`): Prometheus + rules, Loki, Grafana (dashboards in `helm/telemetry-lake/dashboards/`), kafka-exporter, Kafka JMX agent, OTel Collector DaemonSet shipping pod logs to Loki
 
 ## Configuration
 

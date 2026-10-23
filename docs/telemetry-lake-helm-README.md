@@ -197,6 +197,10 @@ The DuckDB pod runs an init script that:
 kubectl exec -it -n telemetry-lake duckdb-0 -- duckdb
 ```
 
+## Observability
+
+With `observability.enabled` (the default) the chart also deploys Prometheus (with alert rules), Loki, Grafana with the Appender, Ingester and Kafka dashboards, kafka-exporter, the Kafka JMX exporter agent, and an OpenTelemetry Collector DaemonSet that ships every pod's logs in the namespace to Loki. Open Grafana with `kubectl port-forward -n telemetry-lake svc/grafana 3000:3000`. Metrics, lag semantics and alerts: [observability.md](observability.md).
+
 ## Service Discovery
 
 All components communicate via Kubernetes internal DNS:
