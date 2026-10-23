@@ -17,6 +17,8 @@ spec:
       labels:
         app: ingester
         {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" .Values.ingester.metricsPort) | nindent 8 }}
     spec:
       containers:
         - name: ingester
@@ -25,6 +27,9 @@ spec:
           ports:
             - name: http
               containerPort: 4318
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.ingester.metricsPort }}
               protocol: TCP
           env:
             # Kafka configuration
@@ -46,6 +51,15 @@ spec:
               value: {{ int .Values.ingester.limits.maxBodyBytes | quote }}
             - name: MAX_DECOMPRESSED_BYTES
               value: {{ int .Values.ingester.limits.maxDecompressedBytes | quote }}
+            # Observability
+            - name: METRICS_PORT
+              value: {{ .Values.ingester.metricsPort | quote }}
+            - name: KAFKA_STATS_INTERVAL_MS
+              value: {{ .Values.ingester.kafkaStatsIntervalMs | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.observability.logFormat | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.observability.logLevel | quote }}
           resources:
             {{- toYaml .Values.ingester.resources | nindent 12 }}
           livenessProbe:

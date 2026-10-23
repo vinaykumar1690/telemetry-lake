@@ -1,0 +1,86 @@
+{{- if .Values.observability.enabled }}
+# Ships the stdout/stderr of every pod in this namespace to Loki. Our services
+# write JSON lines ({"ts","level","service","component","msg",...}); those are
+# parsed so the message becomes the body, level the severity and the other
+# fields log attributes. Other pods' lines (Kafka, Nessie, MinIO) are kept as
+# they are. service.name is the JSON "service" field, else the container name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: otel-collector
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+      filelog:
+        include:
+          - /var/log/pods/{{ .Values.namespace }}_*/*/*.log
+        exclude:
+          # Never its own output
+          - /var/log/pods/{{ .Values.namespace }}_otel-collector-*/*/*.log
+        start_at: end
+        include_file_path: false
+        operators:
+          # CRI/docker framing; adds k8s.namespace.name, k8s.pod.name, k8s.container.name
+          - type: container
+            id: container
+          - type: json_parser
+            id: json
+            if: 'body matches "^\\{"'
+            parse_to: attributes
+            on_error: send_quiet
+            timestamp:
+              parse_from: attributes.ts
+              layout_type: gotime
+              layout: "2006-01-02T15:04:05.000Z"
+            severity:
+              parse_from: attributes.level
+          - type: move
+            if: 'attributes.msg != nil'
+            from: attributes.msg
+            to: body
+          - type: remove
+            if: 'attributes.ts != nil'
+            field: attributes.ts
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      transform/service:
+        log_statements:
+          - context: log
+            statements:
+              - set(resource.attributes["service.name"], log.attributes["service"]) where log.attributes["service"] != nil
+              - delete_key(log.attributes, "service")
+              - set(resource.attributes["service.name"], resource.attributes["k8s.container.name"]) where resource.attributes["service.name"] == nil
+      batch:
+        timeout: 2s
+    exporters:
+      otlphttp/loki:
+        endpoint: http://loki.{{ .Values.namespace }}.svc.cluster.local:3100/otlp
+        sending_queue:
+          queue_size: 1000
+        retry_on_failure:
+          max_elapsed_time: 120s
+    service:
+      telemetry:
+        logs:
+          level: warn
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
+      pipelines:
+        logs:
+          receivers: [filelog]
+          processors: [memory_limiter, transform/service, batch]
+          exporters: [otlphttp/loki]
+{{- end }}

@@ -17,6 +17,8 @@ spec:
       labels:
         app: query
         {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" 8090) | nindent 8 }}
     spec:
       # Stateless: SIGTERM stops accepting connections and lets in-flight queries finish
       terminationGracePeriodSeconds: {{ add .Values.query.timeoutSeconds 10 }}

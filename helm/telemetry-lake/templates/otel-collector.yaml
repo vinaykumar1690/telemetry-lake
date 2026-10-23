@@ -1,0 +1,51 @@
+{{- if .Values.observability.enabled }}
+{{- $col := .Values.observability.collector }}
+# Log shipper; its pipeline is in otel-collector-config.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: otel-collector
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" 8888) | nindent 8 }}
+        checksum/config: {{ include (print $.Template.BasePath "/otel-collector-config.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: otel-collector
+          image: {{ $col.image }}
+          args: ["--config=/etc/otelcol/config.yaml"]
+          # Pod log files are readable by root only
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          ports:
+            - name: metrics
+              containerPort: 8888
+          resources:
+            {{- toYaml $col.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+{{- end }}

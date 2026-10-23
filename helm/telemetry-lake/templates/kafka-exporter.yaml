@@ -1,0 +1,45 @@
+{{- if and .Values.observability.enabled .Values.kafka.enabled }}
+# Broker-side view of Kafka: topic and partition offsets, ISR and consumer
+# group lag. The appender's group offsets are hints written after each Iceberg
+# commit, so this lag is slightly above the true lag (the safe direction) and,
+# unlike the appender's own metrics, is still reported when the appender is down.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-exporter
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: kafka-exporter
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-exporter
+  template:
+    metadata:
+      labels:
+        app: kafka-exporter
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" 9308) | nindent 8 }}
+    spec:
+      containers:
+        - name: kafka-exporter
+          image: {{ .Values.observability.kafkaExporter.image }}
+          args:
+            - --kafka.server={{ include "telemetry-lake.kafkaBootstrap" . }}
+            # The broker may not be up yet; keep retrying instead of exiting
+            - --kafka.allow-auto-topic-creation=false
+            - --log.level=warn
+          ports:
+            - name: metrics
+              containerPort: 9308
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.observability.kafkaExporter.resources | nindent 12 }}
+{{- end }}

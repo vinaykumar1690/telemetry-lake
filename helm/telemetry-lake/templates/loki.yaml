@@ -1,0 +1,126 @@
+{{- if .Values.observability.enabled }}
+{{- $loki := .Values.observability.loki }}
+# Loki (single binary) stores the logs of every pod in this namespace, sent
+# by the collector to its OTLP endpoint (/otlp/v1/logs). service.name and the
+# k8s.* resource attributes become stream labels; the JSON fields of our
+# services' log lines become structured metadata.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: loki
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9095
+      log_level: warn
+    common:
+      path_prefix: /loki
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      retention_period: {{ $loki.retention }}
+      allow_structured_metadata: true
+      volume_enabled: true
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+      delete_request_store: filesystem
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loki
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: loki
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  serviceName: loki
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ $loki | toYaml | sha256sum }}
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+      containers:
+        - name: loki
+          image: {{ $loki.image }}
+          args: ["-config.file=/etc/loki/loki.yaml"]
+          ports:
+            - name: http
+              containerPort: 3100
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml $loki.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: data
+              mountPath: /loki
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ $loki.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: loki
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 3100
+      targetPort: http
+      name: http
+  selector:
+    app: loki
+{{- end }}

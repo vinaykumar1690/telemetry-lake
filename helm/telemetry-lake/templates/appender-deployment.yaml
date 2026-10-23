@@ -17,6 +17,8 @@ spec:
       labels:
         app: appender
         {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" .Values.appender.healthPort) | nindent 8 }}
     spec:
       # SIGTERM triggers a drain and a final Iceberg commit (with retries);
       # give it time before the kubelet sends SIGKILL
@@ -91,6 +93,13 @@ spec:
               value: {{ .Values.appender.promotedAttributes | quote }}
             - name: HEALTH_PORT
               value: {{ .Values.appender.healthPort | quote }}
+            # Observability
+            - name: KAFKA_STATS_INTERVAL_MS
+              value: {{ .Values.appender.kafkaStatsIntervalMs | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.observability.logFormat | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.observability.logLevel | quote }}
             - name: APPENDER_ID
               valueFrom:
                 fieldRef:

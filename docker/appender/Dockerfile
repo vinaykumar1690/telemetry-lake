@@ -47,9 +47,13 @@ COPY proto/ proto/
 COPY tests/ tests/
 
 # Build the appender executable
+# build_info version label (there is no .git in the build context):
+#   docker build --build-arg TELEMETRY_LAKE_VERSION=$(git describe --always --dirty) ...
+ARG TELEMETRY_LAKE_VERSION=unknown
 RUN cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH=/usr/local \
+    -DTELEMETRY_LAKE_VERSION=${TELEMETRY_LAKE_VERSION} \
     -DDUCKDB_ROOT=/usr/local \
     && cmake --build build --target otel_appender -j$(nproc)
 

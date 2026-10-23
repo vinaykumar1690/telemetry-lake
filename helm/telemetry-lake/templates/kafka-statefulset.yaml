@@ -1,4 +1,5 @@
 {{- if .Values.kafka.enabled }}
+{{- $jmx := and .Values.observability.enabled .Values.kafka.metrics.jmx.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -18,7 +19,27 @@ spec:
       labels:
         app: kafka
         {{- include "telemetry-lake.labels" . | nindent 8 }}
+      {{- if $jmx }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" .Values.kafka.metrics.jmx.port) | nindent 8 }}
+        checksum/jmx-config: {{ include (print $.Template.BasePath "/kafka-jmx-configmap.yaml") . | sha256sum }}
+      {{- end }}
     spec:
+      {{- if $jmx }}
+      # The Kafka image has no JMX exporter; fetch the agent into a shared volume
+      initContainers:
+        - name: fetch-jmx-agent
+          image: curlimages/curl:8.16.0
+          command:
+            - curl
+            - -fsSL
+            - -o
+            - /jmx/jmx_prometheus_javaagent.jar
+            - https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/{{ .Values.kafka.metrics.jmx.agentVersion }}/jmx_prometheus_javaagent-{{ .Values.kafka.metrics.jmx.agentVersion }}.jar
+          volumeMounts:
+            - name: jmx-agent
+              mountPath: /jmx
+      {{- end }}
       containers:
         - name: kafka
           image: {{ .Values.kafka.image }}
@@ -29,6 +50,11 @@ spec:
             - name: controller
               containerPort: 9093
               protocol: TCP
+            {{- if $jmx }}
+            - name: metrics
+              containerPort: {{ .Values.kafka.metrics.jmx.port }}
+              protocol: TCP
+            {{- end }}
           command:
             - /bin/bash
             - -c
@@ -65,11 +91,21 @@ spec:
           env:
             - name: KAFKA_HEAP_OPTS
               value: "-Xmx512M -Xms512M"
+            {{- if $jmx }}
+            - name: KAFKA_OPTS
+              value: "-javaagent:/jmx/jmx_prometheus_javaagent.jar={{ .Values.kafka.metrics.jmx.port }}:/etc/jmx/config.yaml"
+            {{- end }}
           resources:
             {{- toYaml .Values.kafka.resources | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/kafka/data
+            {{- if $jmx }}
+            - name: jmx-agent
+              mountPath: /jmx
+            - name: jmx-config
+              mountPath: /etc/jmx
+            {{- end }}
           livenessProbe:
             tcpSocket:
               port: 9092
@@ -80,6 +116,14 @@ spec:
               port: 9092
             initialDelaySeconds: 30
             periodSeconds: 5
+      {{- if $jmx }}
+      volumes:
+        - name: jmx-agent
+          emptyDir: {}
+        - name: jmx-config
+          configMap:
+            name: kafka-jmx-config
+      {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -68,3 +68,15 @@ Kafka bootstrap servers
 {{- define "telemetry-lake.kafkaBootstrap" -}}
 kafka:9092
 {{- end }}
+
+{{/*
+Pod annotations that make the chart's Prometheus scrape a pod.
+Usage: include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" 9464)
+*/}}
+{{- define "telemetry-lake.scrapeAnnotations" -}}
+{{- if .root.Values.observability.enabled }}
+prometheus.io/scrape: "true"
+prometheus.io/port: {{ .port | quote }}
+prometheus.io/path: {{ .path | default "/metrics" | quote }}
+{{- end }}
+{{- end }}

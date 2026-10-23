@@ -36,9 +36,13 @@ COPY proto/ proto/
 COPY tests/ tests/
 
 # Build the ingester executable
+# build_info version label (there is no .git in the build context):
+#   docker build --build-arg TELEMETRY_LAKE_VERSION=$(git describe --always --dirty) ...
+ARG TELEMETRY_LAKE_VERSION=unknown
 RUN cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH=/usr/local \
+    -DTELEMETRY_LAKE_VERSION=${TELEMETRY_LAKE_VERSION} \
     && cmake --build build --target otel_receiver -j$(nproc)
 
 # Runtime stage
@@ -60,8 +64,8 @@ COPY --from=builder /build/build/otel_receiver /usr/local/bin/
 RUN useradd -r -s /bin/false ingester
 USER ingester
 
-# Expose OTel HTTP port
-EXPOSE 4318
+# OTLP/HTTP and Prometheus /metrics
+EXPOSE 4318 9464
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

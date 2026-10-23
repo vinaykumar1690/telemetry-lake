@@ -21,6 +21,13 @@ kafka:
     # >= the ingester's message.max.bytes (max(limits) + 64 KiB), otherwise large
     # payloads are acknowledged over HTTP and then fail delivery.
     messageMaxBytes: 17825792
+  # Broker JMX metrics through the Prometheus JMX exporter java agent (fetched
+  # from Maven Central by an init container); scraped when observability is on
+  metrics:
+    jmx:
+      enabled: true
+      agentVersion: "1.0.1"
+      port: 7071
   # Topic for telemetry log events
   topics:
     logs: telemetry-logs
@@ -109,6 +116,10 @@ ingester:
   # HTTP worker threads. Set to the CPU limit: the default (one per node CPU)
   # oversubscribes the container and multiplies peak per-request memory.
   httpThreads: 2
+  # Prometheus /metrics, on its own port (the OTLP port is proxied by the UI)
+  metricsPort: 9464
+  # librdkafka statistics (rdkafka_* metrics); 0 disables them
+  kafkaStatsIntervalMs: 15000
   resources:
     requests:
       memory: "128Mi"
@@ -176,7 +187,9 @@ appender:
   # comma-separated; they get file statistics and bloom filters, map entries do not
   promotedAttributes: ""
   terminationGracePeriodSeconds: 120
-  healthPort: 8080
+  healthPort: 8080   # also serves /metrics
+  # librdkafka statistics: rdkafka_* metrics and the commit lag; 0 disables them
+  kafkaStatsIntervalMs: 15000
   resources:
     requests:
       memory: "256Mi"
@@ -296,3 +309,77 @@ nessieGc:
     limits:
       memory: "2Gi"
       cpu: "1000m"
+
+# Observability of the stack itself: Prometheus (metrics and alert rules),
+# Loki (logs), Grafana (dashboards), kafka-exporter (broker-side consumer group
+# lag) and an OpenTelemetry Collector DaemonSet that ships every pod's stdout
+# in this namespace to Loki. Reach Grafana with
+#   kubectl port-forward -n <namespace> svc/grafana 3000:3000
+observability:
+  enabled: true
+  # LOG_FORMAT of the ingester and appender: json for the collector, text for kubectl logs
+  logFormat: json
+  logLevel: info
+
+  prometheus:
+    image: prom/prometheus:v3.7.2
+    retention: 7d
+    storage: 5Gi
+    scrapeInterval: 15s
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "1Gi"
+        cpu: "1000m"
+    # Alert thresholds (rules in templates/prometheus.yaml)
+    alerts:
+      commitLagMessages: 100000    # appender commit lag sustained for 10 minutes
+      groupLagMessages: 100000     # kafka-exporter group lag (works when the appender is down)
+      ingesterErrorRatio: 0.05     # 5xx and 503 share of /v1/logs requests
+
+  loki:
+    image: grafana/loki:3.5.7
+    retention: 168h
+    storage: 10Gi
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "1Gi"
+        cpu: "1000m"
+
+  grafana:
+    image: grafana/grafana:12.2.1
+    adminUser: admin
+    adminPassword: admin   # change for anything but a local cluster
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "50m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  kafkaExporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    resources:
+      requests:
+        memory: "32Mi"
+        cpu: "20m"
+      limits:
+        memory: "128Mi"
+        cpu: "200m"
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.138.0
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "256Mi"
+        cpu: "500m"
+

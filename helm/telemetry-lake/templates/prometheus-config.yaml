@@ -1,0 +1,135 @@
+{{- if .Values.observability.enabled }}
+{{- $prom := .Values.observability.prometheus }}
+# Scrape configuration and alert rules (templates/prometheus.yaml runs them)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: prometheus
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ $prom.scrapeInterval }}
+      evaluation_interval: {{ $prom.scrapeInterval }}
+    rule_files:
+      - /etc/prometheus/rules.yml
+    scrape_configs:
+      - job_name: pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [{{ .Values.namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # Scrape the annotated port (targets of a pod's other container ports
+          # end up with identical labels and are merged)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+  rules.yml: |
+    groups:
+      - name: appender
+        rules:
+          - alert: AppenderDown
+            expr: up{app="appender"} == 0 or absent(up{app="appender"})
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: No appender is being scraped; nothing reaches Iceberg
+          - alert: AppenderFatal
+            expr: appender_fatal == 1
+            labels: {severity: critical}
+            annotations:
+              summary: "Appender {{`{{ $labels.pod }}`}} hit a fatal error and is shutting down"
+          - alert: AppenderCommitFailures
+            expr: appender_commit_consecutive_failures >= 3
+            for: 1m
+            labels: {severity: critical}
+            annotations:
+              summary: "{{`{{ $value }}`}} consecutive Iceberg commit failures on {{`{{ $labels.pod }}`}}"
+          - alert: AppenderCommitLagHigh
+            expr: sum(appender_kafka_commit_lag_messages) > {{ int $prom.alerts.commitLagMessages }}
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "{{`{{ $value }}`}} Kafka messages are not committed to Iceberg yet"
+          - alert: AppenderNoRecentCommit
+            # Only while data is waiting: an idle appender has nothing to commit
+            expr: >
+              max(appender_seconds_since_last_commit) > {{ mul 3 .Values.appender.buffer.timeSeconds }}
+              and sum(appender_kafka_commit_lag_messages) > 0
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: Data is waiting but no commit succeeded for 3 commit intervals
+          - alert: AppenderBackpressure
+            expr: max(appender_paused_partitions) > 0
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: Partitions have been paused by backpressure for 10 minutes (staging is full)
+          - alert: AppenderPoisonMessages
+            expr: increase(appender_poison_messages_total[10m]) > 0
+            labels: {severity: info}
+            annotations:
+              summary: "{{`{{ $value }}`}} undecodable messages went to the DLQ in the last 10 minutes"
+          - alert: AppenderDlqFailing
+            expr: increase(appender_dlq_failures_total[5m]) > 0
+            labels: {severity: critical}
+            annotations:
+              summary: DLQ deliveries are failing; the affected partitions are blocked
+      - name: ingester
+        rules:
+          - alert: IngesterErrorRatio
+            expr: >
+              sum(rate(ingester_http_requests_total{route="/v1/logs",code=~"5.."}[5m]))
+              / sum(rate(ingester_http_requests_total{route="/v1/logs"}[5m]))
+              > {{ $prom.alerts.ingesterErrorRatio }}
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: "{{`{{ $value | humanizePercentage }}`}} of OTLP requests fail with 5xx/503"
+          - alert: IngesterDeliveryFailures
+            expr: sum(increase(ingester_kafka_delivery_failures_total[5m])) > 0
+            labels: {severity: critical}
+            annotations:
+              summary: Accepted payloads failed delivery to Kafka (data was acknowledged and lost)
+      - name: kafka
+        rules:
+          - alert: KafkaConsumerGroupLag
+            # From the broker's view (hint commits), so it also fires when the appender is down
+            expr: sum by (consumergroup) (kafka_consumergroup_lag{consumergroup={{ .Values.appender.kafka.consumerGroup | quote }}}) > {{ int $prom.alerts.groupLagMessages }}
+            for: 15m
+            labels: {severity: warning}
+            annotations:
+              summary: "Consumer group {{`{{ $labels.consumergroup }}`}} lags {{`{{ $value }}`}} messages"
+          - alert: KafkaBrokerUnreachable
+            expr: min by (client, broker) (rdkafka_broker_up) == 0
+            for: 5m
+            labels: {severity: critical}
+            annotations:
+              summary: "Client {{`{{ $labels.client }}`}} cannot reach broker {{`{{ $labels.broker }}`}}"
+          - alert: KafkaUnderReplicatedPartitions
+            expr: max(kafka_server_replicamanager_underreplicatedpartitions) > 0
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: Kafka has under-replicated partitions
+{{- end }}
