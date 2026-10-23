@@ -29,8 +29,6 @@ spec:
           image: {{ .Values.observability.kafkaExporter.image }}
           args:
             - --kafka.server={{ include "telemetry-lake.kafkaBootstrap" . }}
-            # The broker may not be up yet; keep retrying instead of exiting
-            - --kafka.allow-auto-topic-creation=false
             - --log.level=warn
           ports:
             - name: metrics

@@ -96,8 +96,13 @@ void collectClient(Families& families, const std::string& client, const json& st
             const auto source = broker.value("source", "");
             if (source == "internal" || source == "logical") continue;
             const auto labels = with(base, "broker", name);
-            families.add("rdkafka_broker_up", "1 while the broker connection is up", kGauge,
-                         broker.value("state", "") == "UP" ? 1 : 0, labels);
+            // librdkafka connects to a broker only once a request needs it
+            // (sparse connections); INIT means not needed yet, not unreachable
+            const auto state = broker.value("state", "");
+            if (state != "INIT") {
+                families.add("rdkafka_broker_up", "1 while the broker connection is up", kGauge,
+                             state == "UP" ? 1 : 0, labels);
+            }
             addFields(families, broker, labels, {
                 {"outbuf_cnt", "rdkafka_broker_outbuf_requests", "Requests waiting to be sent", kGauge},
                 {"waitresp_cnt", "rdkafka_broker_waitresp_requests", "Requests waiting for a response", kGauge},

@@ -94,3 +94,18 @@ TEST(KafkaStats, LogLevels) {
 }
 
 }  // namespace
+
+TEST(KafkaStats, BrokersNotNeededYetAreNotReportedDown) {
+    auto stats = nlohmann::json::parse(fixture("producer_stats.json"));
+    auto& broker = stats["brokers"].begin().value();
+    broker["state"] = "INIT";
+    obs::KafkaStatsCollector collector;
+    ASSERT_TRUE(collector.update("ingester", stats.dump()));
+    EXPECT_EQ(render(collector).find("rdkafka_broker_up"), std::string::npos);
+
+    broker["state"] = "TRY_CONNECT";  // connecting failed and is being retried
+    ASSERT_TRUE(collector.update("ingester", stats.dump()));
+    EXPECT_NE(render(collector).find(R"(rdkafka_broker_up{client="ingester",broker="localhost:9092/1"} 0)"),
+              std::string::npos);
+}
+

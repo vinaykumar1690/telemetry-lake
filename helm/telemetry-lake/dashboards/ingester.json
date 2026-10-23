@@ -159,7 +159,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(ingester_http_requests_total{route=\"/v1/logs\",code=~\"5..\"}[$__rate_interval])) / sum(rate(ingester_http_requests_total{route=\"/v1/logs\"}[$__rate_interval]))",
+          "expr": "(sum(rate(ingester_http_requests_total{route=\"/v1/logs\",code=~\"5..\"}[$__rate_interval])) or vector(0)) / sum(rate(ingester_http_requests_total{route=\"/v1/logs\"}[$__rate_interval]))",
           "instant": true
         }
       ],
