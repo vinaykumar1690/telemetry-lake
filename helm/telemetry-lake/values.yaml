@@ -1,6 +1,27 @@
 # Namespace for all resources
 namespace: telemetry-lake
 
+# Deployment profiles: values-local.yaml (kind / Docker Desktop: MinIO, small
+# memory budgets) and values-eks.yaml (AWS: S3, gp3 volumes, persistent Nessie,
+# larger budgets). These defaults are the local ones.
+
+# StorageClass for every volume; empty uses the cluster's default
+storageClass: ""
+
+# Object storage for the lake, shared by Nessie, the appender, query, query
+# workers, compaction and nessie-gc
+s3:
+  bucket: telemetrylake
+  endpoint: ""          # empty: the in-chart MinIO; required without it (https://s3.<region>.amazonaws.com)
+  region: us-east-1
+  urlStyle: ""          # path or vhost; empty: path for MinIO, vhost otherwise
+  # Secret with keys access-key and secret-key (recommended on AWS: keys never
+  # pass through values). Without it the chart creates s3-credentials from
+  # MinIO's root keys, or from accessKey/secretKey given at install time.
+  existingSecret: ""
+  accessKey: ""
+  secretKey: ""
+
 # Kafka Configuration
 kafka:
   enabled: true
@@ -39,15 +60,16 @@ kafka:
       memory: "1Gi"
       cpu: "1000m"
 
-# MinIO Configuration
+# MinIO: local S3, for laptops. Off on AWS (values-eks.yaml)
 minio:
+  enabled: true
   # Built from source (docker/minio/Dockerfile): MinIO no longer publishes
   # community images or binaries
   image: telemetry-lake/minio:latest
   imagePullPolicy: IfNotPresent
+  # MinIO's root keys, which the services then use
   accessKey: minioadmin
   secretKey: minioadmin
-  bucket: telemetrylake
   storage: 1Gi
   resources:
     requests:
@@ -65,6 +87,10 @@ minio:
 nessie:
   image: ghcr.io/projectnessie/nessie:latest
   warehouse: telemetrylake
+  # inMemory forgets every table when the pod restarts (fine on a laptop);
+  # rocksdb keeps the catalog on a volume (one replica)
+  versionStore: inMemory
+  storage: 10Gi   # rocksdb only
   resources:
     requests:
       memory: "256Mi"
@@ -73,8 +99,11 @@ nessie:
       memory: "1Gi"
       cpu: "500m"
 
-# DuckDB Configuration
-duckdb:
+# DuckDB command-line shell for ad hoc SQL against the bucket
+# (kubectl exec -it duckdb-0 -- duckdb). Not the appender's DuckDB, which is a
+# library in the appender image, configured under appender.duckdb
+duckdbShell:
+  enabled: true
   image: debian:bookworm-slim
   imagePullPolicy: IfNotPresent
   storage: 1Gi
@@ -164,18 +193,6 @@ appender:
     catalogUri: ""  # Defaults to http://nessie:19120/iceberg/
     warehouse: ""   # Defaults to nessie.warehouse
     tableName: "logs"
-  # S3/MinIO storage settings
-  s3:
-    # Endpoint - uses MinIO service from this chart
-    endpoint: ""  # Defaults to http://minio.<namespace>.svc.cluster.local:9000
-    bucket: "telemetrylake"
-    # Credentials - reference secrets or use values from minio config
-    accessKeySecret:
-      name: ""  # If empty, uses minio.accessKey from values
-      key: "access-key"
-    secretKeySecret:
-      name: ""  # If empty, uses minio.secretKey from values
-      key: "secret-key"
   # Commit triggers (whichever comes first) and the staging cap
   buffer:
     sizeMB: 100

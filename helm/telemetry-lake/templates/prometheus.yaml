@@ -52,6 +52,7 @@ metadata:
     app: prometheus
     {{- include "telemetry-lake.labels" . | nindent 4 }}
 spec:
+  {{- include "telemetry-lake.storageClass" (dict "root" . "indent" 2) }}
   accessModes: [ReadWriteOnce]
   resources:
     requests:

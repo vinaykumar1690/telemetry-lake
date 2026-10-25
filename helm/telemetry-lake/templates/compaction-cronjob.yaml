@@ -38,18 +38,7 @@ spec:
                   value: {{ .Values.appender.iceberg.warehouse | default .Values.nessie.warehouse | quote }}
                 - name: ICEBERG_TABLE_NAME
                   value: {{ .Values.appender.iceberg.tableName | quote }}
-                - name: S3_ENDPOINT
-                  value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
-                - name: S3_ACCESS_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .Values.appender.s3.accessKeySecret.name | default "s3-credentials" }}
-                      key: {{ .Values.appender.s3.accessKeySecret.key }}
-                - name: S3_SECRET_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .Values.appender.s3.secretKeySecret.name | default "s3-credentials" }}
-                      key: {{ .Values.appender.s3.secretKeySecret.key }}
+                {{- include "telemetry-lake.s3Env" . | nindent 16 }}
                 # Bloom filters on the promoted columns too
                 - name: PROMOTED_ATTRIBUTES
                   value: {{ .Values.appender.promotedAttributes | quote }}
@@ -102,7 +91,7 @@ spec:
                   exec java -jar /nessie-gc.jar gc --inmemory
                   -u "$NESSIE_API" -c "$CUTOFF"
                   --max-file-modification "$(date -u -d "@$(( $(date +%s) - MAX_FILE_AGE_MINUTES * 60 ))" +%Y-%m-%dT%H:%M:%SZ)"
-                  -I s3.endpoint="$S3_ENDPOINT" -I s3.path-style-access=true -I client.region=us-east-1
+                  -I s3.endpoint="$S3_ENDPOINT" -I s3.path-style-access={{ eq (include "telemetry-lake.s3UrlStyle" .) "path" }} -I client.region="$S3_REGION"
                   -I s3.access-key-id="$S3_ACCESS_KEY" -I s3.secret-access-key="$S3_SECRET_KEY"
               env:
                 - name: NESSIE_API
@@ -112,18 +101,7 @@ spec:
                   value: {{ .Values.nessieGc.cutoff | quote }}
                 - name: MAX_FILE_AGE_MINUTES
                   value: {{ .Values.nessieGc.maxFileAgeMinutes | quote }}
-                - name: S3_ENDPOINT
-                  value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
-                - name: S3_ACCESS_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .Values.appender.s3.accessKeySecret.name | default "s3-credentials" }}
-                      key: {{ .Values.appender.s3.accessKeySecret.key }}
-                - name: S3_SECRET_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .Values.appender.s3.secretKeySecret.name | default "s3-credentials" }}
-                      key: {{ .Values.appender.s3.secretKeySecret.key }}
+                {{- include "telemetry-lake.s3Env" . | nindent 16 }}
               resources:
                 {{- toYaml .Values.nessieGc.resources | nindent 16 }}
 {{- end }}

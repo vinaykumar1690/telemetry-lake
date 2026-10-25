@@ -1,0 +1,111 @@
+# AWS EKS profile: S3 instead of MinIO, gp3 volumes, a persistent Nessie
+# catalog and larger memory budgets (docs/eks.md walks through the install).
+#
+#   kubectl create namespace telemetry-lake
+#   kubectl create secret generic telemetry-lake-s3 -n telemetry-lake \
+#     --from-literal=access-key=AKIA... --from-literal=secret-key=...
+#   helm install telemetry-lake helm/telemetry-lake -f helm/telemetry-lake/values-eks.yaml \
+#     --set s3.bucket=<bucket> --set s3.region=<region> \
+#     --set s3.endpoint=https://s3.<region>.amazonaws.com \
+#     --set observability.grafana.adminPassword=<password> \
+#     --set <component>.image.repository=<account>.dkr.ecr.<region>.amazonaws.com/telemetry-lake/<component> ...
+#
+# Nodes: about 4 vCPU and 16 GiB each, three of them for these budgets.
+
+storageClass: gp3   # create it first (docs/eks.md); EKS marks no class as default
+
+s3:
+  bucket: ""                        # required: --set s3.bucket=
+  region: us-west-2
+  endpoint: ""                      # required: https://s3.<region>.amazonaws.com
+  urlStyle: vhost
+  existingSecret: telemetry-lake-s3 # an IAM user's keys, created outside the chart
+
+minio:
+  enabled: false
+
+duckdbShell:
+  enabled: false   # optional CLI pod; the appender's own DuckDB is unaffected
+
+nessie:
+  versionStore: rocksdb   # the catalog survives restarts (one replica)
+  storage: 10Gi
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "2000m"
+
+kafka:
+  storage: 100Gi
+  config:
+    logRetentionHours: 24   # how long the appender may be down without losing data
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+
+ingester:
+  replicas: 2
+  httpThreads: 4
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "1000m"
+    limits:
+      memory: "1Gi"
+      cpu: "4000m"
+
+appender:
+  buffer:
+    sizeMB: 256
+    maxStagedMB: 1024
+  pipeline:
+    threads: 4
+  duckdb:
+    memoryLimitMB: 2048     # + ~512 MiB outside DuckDB, with headroom
+    threads: 4
+  duckdbTempSizeLimit: 20Gi
+  resources:
+    requests:
+      memory: "3Gi"
+      cpu: "2000m"
+    limits:
+      memory: "4Gi"
+      cpu: "4000m"
+
+query:
+  memoryLimitMB: 3072
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "4000m"
+  workers:
+    memoryLimitMB: 3072
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1000m"
+      limits:
+        memory: "4Gi"
+        cpu: "4000m"
+
+loadgen:
+  workers:
+    replicas: 2
+
+observability:
+  grafana:
+    adminPassword: ""   # required: --set observability.grafana.adminPassword=
+  prometheus:
+    storage: 20Gi
+  loki:
+    storage: 50Gi

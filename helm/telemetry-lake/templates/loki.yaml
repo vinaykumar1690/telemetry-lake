@@ -103,6 +103,7 @@ spec:
     - metadata:
         name: data
       spec:
+        {{- include "telemetry-lake.storageClass" (dict "root" . "indent" 8) }}
         accessModes: [ReadWriteOnce]
         resources:
           requests:

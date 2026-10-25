@@ -74,6 +74,13 @@ Full reference: `docs/observability.md`.
 - Logs: `obs::info/warn/error(component, msg, {fields})`, JSON lines when stdout is not a TTY; never log per message on hot paths (count it in a metric)
 - Helm (`observability.enabled`): Prometheus + rules, Loki, Grafana (dashboards in `helm/telemetry-lake/dashboards/`), kafka-exporter, Kafka JMX agent, OTel Collector DaemonSet shipping pod logs to Loki
 
+## Helm profiles
+
+`values-local.yaml` (MinIO, in-memory Nessie, small budgets) and `values-eks.yaml` (S3 with keys in `s3.existingSecret`, gp3, Nessie on RocksDB, larger budgets); `values.yaml` holds the local defaults.
+- Every S3 consumer takes its env from the `telemetry-lake.s3Env` helper; don't copy S3 settings into a template.
+- `telemetry-lake.checkBudgets` fails the render when a memory budget doesn't fit its container.
+- `duckdbShell` is the ad hoc CLI pod, not the appender's DuckDB.
+
 ## Configuration
 
 `IngesterConfig::fromEnv()` (src/config.hpp) and `appender::AppenderConfig::fromEnv()` (src/appender/appender_config.cpp); integers go through `config_detail::integerFromEnv` and invalid values fail startup.

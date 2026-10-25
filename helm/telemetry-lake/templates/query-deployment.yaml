@@ -34,18 +34,7 @@ spec:
               value: {{ .Values.appender.iceberg.warehouse | default .Values.nessie.warehouse | quote }}
             - name: ICEBERG_TABLE_NAME
               value: {{ .Values.appender.iceberg.tableName | quote }}
-            - name: S3_ENDPOINT
-              value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
-            - name: S3_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.appender.s3.accessKeySecret.name | default "s3-credentials" }}
-                  key: {{ .Values.appender.s3.accessKeySecret.key }}
-            - name: S3_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.appender.s3.secretKeySecret.name | default "s3-credentials" }}
-                  key: {{ .Values.appender.s3.secretKeySecret.key }}
+            {{- include "telemetry-lake.s3Env" . | nindent 12 }}
             - name: HTTP_PORT
               value: "8090"
             - name: QUERY_DEFAULT_LIMIT

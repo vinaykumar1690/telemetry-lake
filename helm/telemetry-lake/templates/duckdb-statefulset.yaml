@@ -1,3 +1,6 @@
+{{- if .Values.duckdbShell.enabled }}
+# DuckDB command-line shell for ad hoc SQL against the bucket. Not the
+# appender: its DuckDB is a library in the appender image (appender.duckdb.*)
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -20,8 +23,8 @@ spec:
     spec:
       containers:
         - name: duckdb
-          image: {{ .Values.duckdb.image }}
-          imagePullPolicy: {{ .Values.duckdb.imagePullPolicy | default "IfNotPresent" }}
+          image: {{ .Values.duckdbShell.image }}
+          imagePullPolicy: {{ .Values.duckdbShell.imagePullPolicy | default "IfNotPresent" }}
           command:
             - /bin/bash
             - -c
@@ -52,24 +55,11 @@ spec:
               # Keep container running
               tail -f /dev/null
           env:
-            - name: S3_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: access-key
-            - name: S3_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: secret-key
-            - name: S3_ENDPOINT
-              value: "minio:9000"
+            {{- include "telemetry-lake.s3Env" . | nindent 12 }}
             - name: NESSIE_ENDPOINT
               value: "http://nessie:19120/iceberg/"
-            - name: MINIO_BUCKET
-              value: {{ .Values.minio.bucket }}
           resources:
-            {{- toYaml .Values.duckdb.resources | nindent 12 }}
+            {{- toYaml .Values.duckdbShell.resources | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /data
@@ -85,8 +75,10 @@ spec:
     - metadata:
         name: data
       spec:
+        {{- include "telemetry-lake.storageClass" (dict "root" . "indent" 8) }}
         accessModes:
           - ReadWriteOnce
         resources:
           requests:
-            storage: {{ .Values.duckdb.storage }}
+            storage: {{ .Values.duckdbShell.storage }}
+{{- end }}

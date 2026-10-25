@@ -1,0 +1,40 @@
+# Local profile: kind or Docker Desktop on a laptop (about 8 GiB for Docker).
+#   helm install telemetry-lake helm/telemetry-lake -f helm/telemetry-lake/values-local.yaml
+# MinIO stands in for S3, Nessie keeps its catalog in memory, and the memory
+# budgets are the smallest that held a 20k records/s load test.
+
+minio:
+  enabled: true
+
+nessie:
+  versionStore: inMemory   # tables are forgotten when Nessie restarts
+
+duckdbShell:
+  enabled: true
+
+appender:
+  buffer:
+    maxStagedMB: 256
+  duckdb:
+    memoryLimitMB: 512     # + ~512 MiB outside DuckDB while catching up
+    threads: 2
+  resources:
+    limits:
+      memory: "1536Mi"
+      cpu: "1000m"
+
+# One of each: a laptop has no room for warm spares
+query:
+  replicas: 1
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 2
+  workers:
+    replicas: 1
+    autoscaling:
+      minReplicas: 1
+      maxReplicas: 2
+
+loadgen:
+  workers:
+    replicas: 0            # the controller sends the load itself

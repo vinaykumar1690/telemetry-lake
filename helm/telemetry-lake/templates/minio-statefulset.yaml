@@ -1,3 +1,5 @@
+{{- if .Values.minio.enabled }}
+# Local S3 (MinIO); with minio.enabled false the services use s3.endpoint
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -38,12 +40,10 @@ spec:
               done
 
               # Create bucket if it doesn't exist
-              mc mb myminio/{{ .Values.minio.bucket }} --ignore-existing
-              echo "Bucket {{ .Values.minio.bucket }} created or already exists"
+              mc mb myminio/{{ .Values.s3.bucket }} --ignore-existing
+              echo "Bucket {{ .Values.s3.bucket }} created or already exists"
 
-              # Set bucket policy to allow read/write access
-              mc anonymous set public myminio/{{ .Values.minio.bucket }}
-              echo "Bucket policy set to public"
+              # No anonymous access: every service authenticates with the keys
 
               # Stop the temporary MinIO server
               kill $MINIO_PID
@@ -53,12 +53,12 @@ spec:
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef:
-                  name: s3-credentials
+                  name: {{ include "telemetry-lake.s3Secret" . }}
                   key: access-key
             - name: MINIO_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: s3-credentials
+                  name: {{ include "telemetry-lake.s3Secret" . }}
                   key: secret-key
           volumeMounts:
             - name: data
@@ -76,12 +76,12 @@ spec:
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef:
-                  name: s3-credentials
+                  name: {{ include "telemetry-lake.s3Secret" . }}
                   key: access-key
             - name: MINIO_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: s3-credentials
+                  name: {{ include "telemetry-lake.s3Secret" . }}
                   key: secret-key
           ports:
             - name: api
@@ -111,8 +111,10 @@ spec:
     - metadata:
         name: data
       spec:
+        {{- include "telemetry-lake.storageClass" (dict "root" . "indent" 8) }}
         accessModes:
           - ReadWriteOnce
         resources:
           requests:
             storage: {{ .Values.minio.storage }}
+{{- end }}

@@ -1,3 +1,6 @@
+{{- if .Values.duckdbShell.enabled }}
+# DuckDB command-line shell for ad hoc SQL against the bucket. Not the
+# appender: its DuckDB is a library in the appender image (appender.duckdb.*)
 apiVersion: v1
 kind: Service
 metadata:
@@ -16,3 +19,4 @@ spec:
       protocol: TCP
   selector:
     app: duckdb
+{{- end }}

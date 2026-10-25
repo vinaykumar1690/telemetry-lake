@@ -254,6 +254,10 @@ docker build -f docker/loadgen/Dockerfile -t telemetry-lake/loadgen:latest .
 docker build -f docker/minio/Dockerfile -t telemetry-lake/minio:latest .   # MinIO publishes no community images any more
 ```
 
+Install with a profile:
+- `-f helm/telemetry-lake/values-local.yaml` for a laptop: MinIO, small memory budgets;
+- `-f helm/telemetry-lake/values-eks.yaml` for AWS: S3, gp3, persistent Nessie, larger budgets; see [docs/eks.md](docs/eks.md).
+
 Open the UI from your laptop with `kubectl port-forward -n telemetry-lake svc/ui 8080:80` and http://localhost:8080. Its **Load test** tab drives `otel-loadgen`, which sends a sustained rate straight to the ingester ([docs/load-testing.md](docs/load-testing.md)).
 
 ## Configuration

@@ -326,12 +326,30 @@ duckdb:
 
 ### Step 1: Install Helm Chart
 
+Pick a profile:
+
 ```bash
-cd helm/telemetry-lake
-helm install telemetry-lake .
+# Laptop (kind / Docker Desktop): MinIO, in-memory Nessie, small memory budgets
+helm install telemetry-lake helm/telemetry-lake -f helm/telemetry-lake/values-local.yaml
+
+# AWS EKS: S3, gp3 volumes, Nessie on RocksDB, larger budgets (see eks.md)
+helm install telemetry-lake helm/telemetry-lake -f helm/telemetry-lake/values-eks.yaml --set s3.bucket=... ...
 ```
 
-Note: No custom Docker image build is required. DuckDB is installed at runtime from the official GitHub releases.
+`values.yaml` holds the local defaults, so a bare `helm install telemetry-lake helm/telemetry-lake` also works on a laptop.
+
+| Value | Local | EKS |
+|---|---|---|
+| `minio.enabled` | `true` | `false` |
+| `s3.*` (bucket, endpoint, region, urlStyle) | MinIO, path style | `https://s3.<region>.amazonaws.com`, vhost |
+| S3 keys | `s3-credentials`, made from MinIO's root keys | `s3.existingSecret`: a Secret you create (`access-key`, `secret-key`) |
+| `nessie.versionStore` | `inMemory` (tables forgotten on restart) | `rocksdb` on a PVC |
+| `storageClass` | the cluster default | `gp3` |
+| `duckdbShell.enabled` | `true` | `false` |
+
+`duckdbShell` is the ad hoc DuckDB command-line pod. It is not the appender's DuckDB, which is built into the appender image and configured by `appender.duckdb.*`.
+
+The chart refuses to render when the memory budgets don't fit their containers. The appender's `duckdb.memoryLimitMB` + 512 MiB must fit its pod and be at least `buffer.maxStagedMB`. The query service's and workers' `memoryLimitMB` must fit theirs. It also refuses when an AWS install is missing the bucket, endpoint, S3 Secret or Grafana password.
 
 ### Step 2: Wait for Pods
 

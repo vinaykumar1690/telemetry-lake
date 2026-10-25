@@ -8,6 +8,10 @@ metadata:
     {{- include "telemetry-lake.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  {{- if eq .Values.nessie.versionStore "rocksdb" }}
+  strategy:
+    type: Recreate  # RocksDB allows one process on the volume
+  {{- end }}
   selector:
     matchLabels:
       app: nessie
@@ -17,6 +21,10 @@ spec:
         app: nessie
         {{- include "telemetry-lake.labels" . | nindent 8 }}
     spec:
+      {{- if eq .Values.nessie.versionStore "rocksdb" }}
+      securityContext:
+        fsGroup: 185  # the image's nessie user
+      {{- end }}
       containers:
         - name: nessie
           image: {{ .Values.nessie.image }}
@@ -33,14 +41,16 @@ spec:
               value: {{ .Values.nessie.warehouse }}
             # Warehouse location in S3
             - name: NESSIE_CATALOG_WAREHOUSES_{{ .Values.nessie.warehouse | upper }}_LOCATION
-              value: "s3://{{ .Values.minio.bucket }}"
-            # S3 endpoint configuration for MinIO
+              value: {{ printf "s3://%s" (required "s3.bucket is required" .Values.s3.bucket) | quote }}
+            # S3: the in-chart MinIO or AWS (helpers in _helpers.tpl)
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_REGION
-              value: "us-east-1"
+              value: {{ .Values.s3.region | quote }}
+            {{- if .Values.minio.enabled }}
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_ENDPOINT
-              value: {{ include "telemetry-lake.minioEndpoint" . }}
+              value: {{ include "telemetry-lake.s3Endpoint" . | quote }}
+            {{- end }}
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_PATH-STYLE_ACCESS
-              value: "true"
+              value: {{ eq (include "telemetry-lake.s3UrlStyle" .) "path" | quote }}
             # S3 credentials via Nessie secret reference
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_AUTH-TYPE
               value: "STATIC"
@@ -50,13 +60,26 @@ spec:
             - name: MY-SECRETS_S3-DEFAULT_NAME
               valueFrom:
                 secretKeyRef:
-                  name: s3-credentials
+                  name: {{ include "telemetry-lake.s3Secret" . }}
                   key: access-key
             - name: MY-SECRETS_S3-DEFAULT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: s3-credentials
+                  name: {{ include "telemetry-lake.s3Secret" . }}
                   key: secret-key
+            {{- if eq .Values.nessie.versionStore "rocksdb" }}
+            # Persistent catalog; the default IN_MEMORY store forgets every
+            # table when the pod restarts
+            - name: NESSIE_VERSION_STORE_TYPE
+              value: ROCKSDB
+            - name: NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH
+              value: /nessie-data
+            {{- end }}
+          {{- if eq .Values.nessie.versionStore "rocksdb" }}
+          volumeMounts:
+            - name: data
+              mountPath: /nessie-data
+          {{- end }}
           resources:
             {{- toYaml .Values.nessie.resources | nindent 12 }}
           livenessProbe:
@@ -71,3 +94,28 @@ spec:
               port: 9000
             initialDelaySeconds: 30
             periodSeconds: 5
+      {{- if eq .Values.nessie.versionStore "rocksdb" }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: nessie-data
+      {{- end }}
+{{- if eq .Values.nessie.versionStore "rocksdb" }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nessie-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: nessie
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  {{- include "telemetry-lake.storageClass" (dict "root" . "indent" 2) }}
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.nessie.storage }}
+{{- else if ne .Values.nessie.versionStore "inMemory" }}
+{{- fail "nessie.versionStore must be inMemory or rocksdb" }}
+{{- end }}

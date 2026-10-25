@@ -27,7 +27,7 @@ Usage (inside the compaction image):
 Configuration (environment; catalog and S3 names match the appender's):
   ICEBERG_CATALOG_URI, ICEBERG_WAREHOUSE, ICEBERG_NAMESPACE (default),
   ICEBERG_TABLE_NAME (logs), ICEBERG_OFFSETS_TABLE (_appender_offsets),
-  S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION (us-east-1),
+  S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION (us-east-1), S3_URL_STYLE (path),
   PROMOTED_ATTRIBUTES (bloom filters on their columns),
   BLOOM_FILTER_COLUMNS (trace_id,span_id,host_name,service_instance_id),
   COMPACTION_STEPS, COMPACTION_MIN_AGE_MINUTES (60), TARGET_FILE_SIZE_MB (512),
@@ -86,7 +86,8 @@ def session():
         .config(f"{prefix}.uri", env("ICEBERG_CATALOG_URI"))
         .config(f"{prefix}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
         .config(f"{prefix}.s3.endpoint", endpoint)
-        .config(f"{prefix}.s3.path-style-access", "true")
+        # path for MinIO; AWS S3 uses virtual-hosted addressing (S3_URL_STYLE=vhost)
+        .config(f"{prefix}.s3.path-style-access", str(env("S3_URL_STYLE", "path") == "path").lower())
         .config(f"{prefix}.s3.access-key-id", env("S3_ACCESS_KEY"))
         .config(f"{prefix}.s3.secret-access-key", env("S3_SECRET_KEY"))
         .config(f"{prefix}.client.region", env("S3_REGION", "us-east-1"))

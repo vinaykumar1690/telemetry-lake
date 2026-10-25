@@ -1,3 +1,5 @@
+{{- if .Values.minio.enabled }}
+# Local S3 (MinIO); with minio.enabled false the services use s3.endpoint
 apiVersion: v1
 kind: Service
 metadata:
@@ -41,4 +43,5 @@ spec:
       {{- end }}
   selector:
     app: minio
+{{- end }}
 {{- end }}

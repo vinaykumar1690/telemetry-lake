@@ -1,3 +1,6 @@
+{{- if .Values.duckdbShell.enabled }}
+# DuckDB command-line shell for ad hoc SQL against the bucket. Not the
+# appender: its DuckDB is a library in the appender image (appender.duckdb.*)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,19 +17,22 @@ data:
     LOAD iceberg;
     LOAD httpfs;
 
-    -- Create S3 secret for MinIO access
+    -- S3 secret; the keys come from the pod's environment (s3-credentials or
+    -- s3.existingSecret), never from this ConfigMap
+    {{- $endpoint := include "telemetry-lake.s3Endpoint" . }}
     CREATE SECRET s3_secret (
         TYPE S3,
-        KEY_ID '{{ .Values.minio.accessKey }}',
-        SECRET '{{ .Values.minio.secretKey }}',
-        ENDPOINT 'minio:9000',
-        USE_SSL false,
-        URL_STYLE 'path'
+        KEY_ID getenv('S3_ACCESS_KEY'),
+        SECRET getenv('S3_SECRET_KEY'),
+        REGION '{{ .Values.s3.region }}',
+        ENDPOINT '{{ $endpoint | trimPrefix "https://" | trimPrefix "http://" }}',
+        USE_SSL {{ hasPrefix "https://" $endpoint }},
+        URL_STYLE '{{ include "telemetry-lake.s3UrlStyle" . }}'
     );
 
     -- Show confirmation
     SELECT 'DuckDB initialized with Iceberg and HTTPFS extensions' AS status;
-    SELECT 'S3 secret configured for MinIO' AS status;
+    SELECT 'S3 secret configured' AS status;
 
   init.sh: |
     #!/bin/sh
@@ -42,3 +48,4 @@ data:
 
     # Keep the container running
     tail -f /dev/null
+{{- end }}

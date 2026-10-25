@@ -1,4 +1,7 @@
 {{- if .Values.observability.enabled }}
+{{- if and (not .Values.minio.enabled) (or (not .Values.observability.grafana.adminPassword) (eq .Values.observability.grafana.adminPassword "admin")) }}
+{{- fail "observability.grafana.adminPassword: set a real password outside a local deployment (--set observability.grafana.adminPassword=...)" }}
+{{- end }}
 {{- $graf := .Values.observability.grafana }}
 # Grafana with the Prometheus and Loki datasources and the dashboards in
 # helm/telemetry-lake/dashboards/ provisioned (edits in the UI are not kept).

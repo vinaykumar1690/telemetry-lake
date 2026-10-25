@@ -1,4 +1,5 @@
 {{- if .Values.appender.enabled }}
+{{- include "telemetry-lake.checkBudgets" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,35 +41,8 @@ spec:
               value: {{ .Values.appender.iceberg.catalogUri | default (include "telemetry-lake.nessieEndpoint" .) | quote }}
             - name: ICEBERG_TABLE_NAME
               value: {{ .Values.appender.iceberg.tableName | quote }}
-            # S3/MinIO configuration
-            - name: S3_ENDPOINT
-              value: {{ .Values.appender.s3.endpoint | default (include "telemetry-lake.minioEndpoint" .) | quote }}
-            - name: S3_BUCKET
-              value: {{ .Values.appender.s3.bucket | quote }}
-            - name: S3_ACCESS_KEY
-              {{- if .Values.appender.s3.accessKeySecret.name }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.appender.s3.accessKeySecret.name }}
-                  key: {{ .Values.appender.s3.accessKeySecret.key }}
-              {{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: access-key
-              {{- end }}
-            - name: S3_SECRET_KEY
-              {{- if .Values.appender.s3.secretKeySecret.name }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.appender.s3.secretKeySecret.name }}
-                  key: {{ .Values.appender.s3.secretKeySecret.key }}
-              {{- else }}
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: secret-key
-              {{- end }}
+            # S3 (the in-chart MinIO, or AWS S3)
+            {{- include "telemetry-lake.s3Env" . | nindent 12 }}
             # Iceberg warehouse registered in Nessie
             - name: ICEBERG_WAREHOUSE
               value: {{ .Values.appender.iceberg.warehouse | default .Values.nessie.warehouse | quote }}
