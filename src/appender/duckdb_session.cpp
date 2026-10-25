@@ -204,9 +204,21 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const Appender
     if (auto r = session->pinUtc(); !r) return std::unexpected(r.error());
     auto conn = session->connect();
 
-    // Extension installs need a writable home; container HOMEs often are not
-    const std::string setup[] = {
+    // Extension installs need a writable home; container HOMEs often are not.
+    // Spilling needs a writable temp directory: DuckDB's default is .tmp in
+    // the working directory, which a non-root container cannot create, and
+    // staging and commits then fail as soon as memory runs short (under load).
+    // DuckDB sizes its memory limit and threads from what it detects, which in
+    // a container can be the node's cores; set both to fit the pod
+    std::vector<std::string> setup = {
         std::format("SET home_directory = {}", sql::literal(config.duckdb_home_directory)),
+        std::format("SET temp_directory = {}", sql::literal(config.duckdb_temp_directory)),
+    };
+    if (config.duckdb_memory_limit_bytes) {
+        setup.push_back(std::format("SET memory_limit = '{}MiB'", config.duckdb_memory_limit_bytes / (1024 * 1024)));
+    }
+    if (config.duckdb_threads) setup.push_back(std::format("SET threads = {}", config.duckdb_threads));
+    setup.insert(setup.end(), {
         "INSTALL httpfs",
         "LOAD httpfs",
         "INSTALL iceberg",
@@ -222,7 +234,7 @@ Result<std::unique_ptr<DuckdbSession>> DuckdbSession::openIceberg(const Appender
                     sql::literal(config.catalog_uri), sql::literal(config.access_delegation_mode)),
         std::format("CREATE SCHEMA IF NOT EXISTS {}.{}", AppenderConfig::kCatalogAlias,
                     sql::identifier(config.iceberg_namespace)),
-    };
+    });
     for (const auto& statement : setup) {
         if (auto r = run(*conn, statement); !r) {
             // Do not echo statements: the secret carries credentials

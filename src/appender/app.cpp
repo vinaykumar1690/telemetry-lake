@@ -162,6 +162,7 @@ int runAppender(const AppenderConfig& config) {
                         .max_poll_interval_ms = config.max_poll_interval_ms,
                         .revoke_timeout = config.revoke_timeout,
                         .stats_interval_ms = config.kafka_stats_interval_ms,
+                        .queued_max_kbytes = config.kafka_queued_max_kbytes,
                         .stats = kafka_stats,
                         .metrics = appender_metrics},
                        staging, pipelines, committer, recovery_offsets, on_fatal);

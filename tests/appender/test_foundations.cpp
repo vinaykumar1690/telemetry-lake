@@ -58,7 +58,9 @@ void setRequired(ScopedEnv& env) {
                              "ICEBERG_TABLE_NAME", "ICEBERG_OFFSETS_TABLE", "ICEBERG_NAMESPACE",
                              "ICEBERG_RETRY_BASE_DELAY_MS", "ICEBERG_RETRY_MAX_DELAY_MS",
                              "S3_URL_STYLE", "APPENDER_ID", "ICEBERG_WAREHOUSE",
-                             "ICEBERG_ACCESS_DELEGATION_MODE", "PROMOTED_ATTRIBUTES"}) {
+                             "ICEBERG_ACCESS_DELEGATION_MODE", "PROMOTED_ATTRIBUTES",
+                             "DUCKDB_HOME_DIRECTORY", "DUCKDB_TEMP_DIRECTORY",
+                             "DUCKDB_MEMORY_LIMIT_MB", "DUCKDB_THREADS", "KAFKA_QUEUED_MAX_KBYTES"}) {
         env.unset(name);
     }
 }
@@ -81,6 +83,34 @@ TEST(AppenderConfigTest, Defaults) {
     EXPECT_EQ(config.warehouse, "bucket");  // defaults to S3_BUCKET
     EXPECT_EQ(config.qualifiedLogsTable(), R"(lake."default"."logs")");
     EXPECT_EQ(config.qualifiedOffsetsTable(), R"(lake."default"."_appender_offsets")");
+}
+
+TEST(AppenderConfigTest, DuckdbTempDirectoryFollowsHome) {
+    ScopedEnv env;
+    setRequired(env);
+    EXPECT_EQ(AppenderConfig::fromEnv().duckdb_temp_directory, "/tmp/duckdb_tmp");
+    env.set("DUCKDB_HOME_DIRECTORY", "/home/appender");
+    EXPECT_EQ(AppenderConfig::fromEnv().duckdb_temp_directory, "/home/appender/duckdb_tmp");
+    env.set("DUCKDB_TEMP_DIRECTORY", "/var/tmp/duckdb");
+    EXPECT_EQ(AppenderConfig::fromEnv().duckdb_temp_directory, "/var/tmp/duckdb");
+}
+
+TEST(AppenderConfigTest, MemoryCaps) {
+    ScopedEnv env;
+    setRequired(env);
+    auto config = AppenderConfig::fromEnv();
+    EXPECT_EQ(config.duckdb_memory_limit_bytes, 0u);  // DuckDB's default
+    EXPECT_EQ(config.duckdb_threads, 0u);
+    EXPECT_EQ(config.kafka_queued_max_kbytes, 16 * 1024);
+    env.set("DUCKDB_MEMORY_LIMIT_MB", "512");
+    env.set("DUCKDB_THREADS", "2");
+    env.set("KAFKA_QUEUED_MAX_KBYTES", "8192");
+    config = AppenderConfig::fromEnv();
+    EXPECT_EQ(config.duckdb_memory_limit_bytes, 512u * 1024 * 1024);
+    EXPECT_EQ(config.duckdb_threads, 2u);
+    EXPECT_EQ(config.kafka_queued_max_kbytes, 8192);
+    env.set("KAFKA_QUEUED_MAX_KBYTES", "10");
+    EXPECT_THROW(AppenderConfig::fromEnv(), std::runtime_error);
 }
 
 TEST(AppenderConfigTest, MissingRequiredVariableThrows) {

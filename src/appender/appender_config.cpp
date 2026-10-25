@@ -115,6 +115,8 @@ AppenderConfig AppenderConfig::fromEnv() {
         integerFromEnv("MAX_POLL_INTERVAL_MS", config.max_poll_interval_ms, 10'000, 86'400'000);
     config.kafka_stats_interval_ms = integerFromEnv(
         "KAFKA_STATS_INTERVAL_MS", config.kafka_stats_interval_ms, 0, 86'400'000);
+    config.kafka_queued_max_kbytes = integerFromEnv(
+        "KAFKA_QUEUED_MAX_KBYTES", config.kafka_queued_max_kbytes, 1024, 2'097'151);
 
     config.catalog_uri = requiredEnv("ICEBERG_CATALOG_URI");
     optionalEnv("ICEBERG_WAREHOUSE", config.warehouse);
@@ -196,6 +198,13 @@ AppenderConfig AppenderConfig::fromEnv() {
         static_cast<int>(config.offsets_maintenance_interval.count()), 0, 86'400 * 7)};
 
     optionalEnv("DUCKDB_HOME_DIRECTORY", config.duckdb_home_directory);
+    optionalEnv("DUCKDB_TEMP_DIRECTORY", config.duckdb_temp_directory);
+    if (config.duckdb_temp_directory.empty()) {
+        config.duckdb_temp_directory = config.duckdb_home_directory + "/duckdb_tmp";
+    }
+    config.duckdb_memory_limit_bytes =
+        integerFromEnv<std::size_t>("DUCKDB_MEMORY_LIMIT_MB", 0, 0, 1 << 20) * kMiB;
+    config.duckdb_threads = integerFromEnv("DUCKDB_THREADS", config.duckdb_threads, 0u, 256u);
     config.health_port = integerFromEnv<std::uint16_t>("HEALTH_PORT", config.health_port, 1, 65535);
     config.appender_id = hostname();
     optionalEnv("APPENDER_ID", config.appender_id);

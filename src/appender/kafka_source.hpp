@@ -34,6 +34,7 @@ struct KafkaSourceOptions {
     std::size_t batch_size = 500;
     std::chrono::milliseconds poll_timeout{100};
     int stats_interval_ms = 0;  // librdkafka statistics; 0 disables them
+    int queued_max_kbytes = 16 * 1024;  // prefetch per partition
     std::shared_ptr<obs::KafkaStatsCollector> stats;
     std::shared_ptr<AppenderMetrics> metrics;  // standalone when null
 };

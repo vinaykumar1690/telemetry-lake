@@ -4,8 +4,10 @@
 #include "observability/kafka_stats.hpp"
 #include "observability/log.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <format>
+#include <iterator>
 #include <random>
 #include <thread>
 
@@ -57,6 +59,9 @@ Result<void> KafkaSource::init() {
             // before our revoke callback returns, which is what the fence relies on
             {"partition.assignment.strategy", "range,roundrobin"},
             {"statistics.interval.ms", options_.stats_interval_ms},
+            // librdkafka's default prefetch (64 MiB per partition) alone can
+            // outgrow a small pod; staged rows are bounded by MAX_STAGED_MB
+            {"queued.max.messages.kbytes", options_.queued_max_kbytes},
         };
         // Stats, log and error callbacks run inside poll(), on this thread
         if (options_.stats) {
@@ -289,6 +294,24 @@ void KafkaSource::onRevoked(const cppkafka::TopicPartitionList& partitions) {
     }
     metrics_->revoke_fence_duration.Observe(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - fence_started).count());
+
+    // librdkafka keeps a partition's pause flag across revoke and
+    // reassignment, while paused_ forgets it here: a partition paused for
+    // backpressure would come back paused and never be resumed. Clear the
+    // flag now, while we still own the partition; whatever it fetches belongs
+    // to this assignment and is purged with it. Only resume partitions that
+    // are paused: before librdkafka 2.4, resuming one that is not restarts
+    // its fetch from an earlier position, which duplicates messages
+    std::set<std::int32_t> paused_revoked;
+    std::ranges::set_intersection(paused_, revoked, std::inserter(paused_revoked, paused_revoked.end()));
+    if (!paused_revoked.empty()) {
+        try {
+            consumer_->resume_partitions(partitionList(paused_revoked));
+        } catch (const std::exception& e) {
+            obs::warn("kafka", "resuming paused partitions before revoke failed",
+                      {{"partitions", describe(paused_revoked)}, {"error", e.what()}});
+        }
+    }
     pipelines_.dropPartitions(revoked);
     flow_.forget(revoked);
     committer_.discard(revoked);

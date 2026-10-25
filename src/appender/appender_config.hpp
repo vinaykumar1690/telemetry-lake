@@ -25,6 +25,8 @@ struct AppenderConfig {
     int max_poll_interval_ms = 300'000;
     // librdkafka statistics (rdkafka_* metrics, consumer and commit lag); 0 disables them
     int kafka_stats_interval_ms = 15'000;
+    // librdkafka prefetch per partition (queued.max.messages.kbytes)
+    int kafka_queued_max_kbytes = 16 * 1024;
 
     // Iceberg REST catalog
     std::string catalog_uri;
@@ -66,6 +68,13 @@ struct AppenderConfig {
 
     // DuckDB installs extensions under its home directory, which must be writable
     std::string duckdb_home_directory = "/tmp";
+    // Where DuckDB spills when staged rows or a commit outgrow its memory
+    // limit; must be writable. Empty in fromEnv: <home>/duckdb_tmp
+    std::string duckdb_temp_directory;
+    // DuckDB's own caps; 0 keeps its defaults (80 % of the memory it detects,
+    // one thread per core it sees, often the node's rather than the pod's)
+    std::size_t duckdb_memory_limit_bytes = 0;
+    unsigned duckdb_threads = 0;
 
     std::uint16_t health_port = 8080;
     std::string appender_id;  // recorded with each offsets row; defaults to the hostname
