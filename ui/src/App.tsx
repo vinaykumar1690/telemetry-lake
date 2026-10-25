@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import { GeneratorPage } from "./generator/GeneratorPage";
+import { LoadTestPage } from "./loadtest/LoadTestPage";
 import { SearchPage } from "./search/SearchPage";
 import { DEFAULT_STATE, type SearchState } from "./search/types";
 import { zoneLabel } from "./time";
 
-type Tab = "search" | "generate";
+type Tab = "search" | "generate" | "load-test";
 
-const tabFromHash = (): Tab => (window.location.hash === "#generate" ? "generate" : "search");
+const tabFromHash = (): Tab => {
+  const hash = window.location.hash.slice(1);
+  return hash === "generate" || hash === "load-test" ? hash : "search";
+};
 
 function loadUtc(): boolean {
   try {
@@ -55,6 +59,13 @@ export default function App() {
   const [utc, setUtc] = useState(loadUtc);
   const queryUp = useStatus("/api/query/ready");
   const ingestUp = useStatus("/api/ingest/ready");
+  const loadgenUp = useStatus("/api/loadgen/ready");
+
+  const showSearch = (next: SearchState) => {
+    setSearch(next);
+    setRunToken((t) => t + 1);
+    go("search");
+  };
 
   useEffect(() => {
     const onHash = () => setTab(tabFromHash());
@@ -89,10 +100,14 @@ export default function App() {
           <button role="tab" aria-selected={tab === "generate"} className={tab === "generate" ? "active" : ""} onClick={() => go("generate")}>
             Generate logs
           </button>
+          <button role="tab" aria-selected={tab === "load-test"} className={tab === "load-test" ? "active" : ""} onClick={() => go("load-test")}>
+            Load test
+          </button>
         </nav>
         <div className="topbar-right">
           <Status label="query" up={queryUp} />
           <Status label="ingester" up={ingestUp} />
+          <Status label="loadgen" up={loadgenUp} />
           <button className="ghost small" onClick={toggleUtc} title="Time zone used to show and enter times">
             {zoneLabel(utc)}
           </button>
@@ -103,14 +118,10 @@ export default function App() {
           <SearchPage state={search} setState={setSearch} runToken={runToken} utc={utc} />
         </div>
         <div hidden={tab !== "generate"}>
-          <GeneratorPage
-            utc={utc}
-            onSearch={(next) => {
-              setSearch(next);
-              setRunToken((t) => t + 1);
-              go("search");
-            }}
-          />
+          <GeneratorPage utc={utc} onSearch={showSearch} />
+        </div>
+        <div hidden={tab !== "load-test"}>
+          <LoadTestPage active={tab === "load-test"} onSearch={showSearch} />
         </div>
       </main>
     </div>

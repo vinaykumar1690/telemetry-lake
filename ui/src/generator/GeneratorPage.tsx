@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { NumberInput, SeverityWeightsEditor, ServicesEditor } from "../forms";
 import type { SearchState } from "../search/types";
 import { DEFAULT_STATE } from "../search/types";
 import { fromLocalInput, toLocalInput } from "../time";
@@ -6,7 +7,6 @@ import {
   DEFAULT_SERVICES,
   DEFAULT_WEIGHTS,
   type GeneratorConfig,
-  SEVERITIES,
   type ServiceSpec,
   type Severity,
   batchCount,
@@ -30,19 +30,6 @@ interface Run {
 }
 
 const MAX_SEARCH_HOURS = 168;
-
-function NumberInput({ value, onChange, min = 0, max, step = 1 }: { value: number; onChange: (n: number) => void; min?: number; max?: number; step?: number }) {
-  return (
-    <input
-      type="number"
-      value={Number.isFinite(value) ? value : ""}
-      min={min}
-      max={max}
-      step={step}
-      onChange={(e) => onChange(e.target.valueAsNumber)}
-    />
-  );
-}
 
 export function GeneratorPage({ utc, onSearch }: Props) {
   const [services, setServices] = useState<ServiceSpec[]>(DEFAULT_SERVICES);
@@ -118,10 +105,6 @@ export function GeneratorPage({ utc, onSearch }: Props) {
       attrs: [{ field: "attr.generator.run_id", op: "=", value: r.config.runId }],
     });
 
-  const setService = (i: number, patch: Partial<ServiceSpec>) =>
-    setServices((list) => list.map((s, j) => (j === i ? { ...s, ...patch } : s)));
-
-  const weightSum = SEVERITIES.reduce((n, s) => n + Math.max(0, weights[s] || 0), 0);
   const p = run?.progress;
   const done = p ? p.recordsSent + p.recordsFailed : 0;
   const pct = run ? Math.min(100, (done / run.config.total) * 100) : 0;
@@ -136,35 +119,7 @@ export function GeneratorPage({ utc, onSearch }: Props) {
       <div className="gen-grid">
         <section className="card">
           <h2>Services and pods</h2>
-          <table className="services">
-            <thead>
-              <tr>
-                <th>service.name</th>
-                <th>Pods</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {services.map((s, i) => (
-                <tr key={i}>
-                  <td>
-                    <input value={s.name} onChange={(e) => setService(i, { name: e.target.value })} />
-                  </td>
-                  <td>
-                    <NumberInput value={s.pods} min={1} max={100} onChange={(pods) => setService(i, { pods })} />
-                  </td>
-                  <td>
-                    <button className="ghost small" aria-label="Remove service" onClick={() => setServices((l) => l.filter((_, j) => j !== i))}>
-                      ✕
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <button className="ghost small" onClick={() => setServices((l) => [...l, { name: `service-${l.length + 1}`, pods: 2 }])}>
-            + Service
-          </button>
+          <ServicesEditor services={services} setServices={setServices} />
           <div className="form-grid">
             <label>
               service.namespace
@@ -231,15 +186,7 @@ export function GeneratorPage({ utc, onSearch }: Props) {
             </label>
           </div>
           <h3>Severity mix</h3>
-          <div className="weights">
-            {SEVERITIES.map((s) => (
-              <label key={s}>
-                <span className={`sev sev-${s.toLowerCase()}`}>{s}</span>
-                <NumberInput value={weights[s]} min={0} onChange={(n) => setWeights((w) => ({ ...w, [s]: n }))} />
-                <span className="muted small-text">{weightSum ? Math.round(((weights[s] || 0) / weightSum) * 100) : 0}%</span>
-              </label>
-            ))}
-          </div>
+          <SeverityWeightsEditor weights={weights} setWeights={setWeights} />
         </section>
       </div>
 

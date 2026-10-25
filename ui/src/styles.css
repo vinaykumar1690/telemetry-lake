@@ -205,6 +205,19 @@ label.inline { margin-top: 10px; max-width: 200px; }
 .progress-fill.has-failures { background: var(--warn); }
 .run-stats { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; }
 .run-done { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; font-size: 13px; }
+/* Load test */
+.form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-top: 14px; }
+.inline-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.inline-field input { width: 130px; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.stat-label { font-size: 12px; color: var(--muted); }
+.stat-value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-sub { font-size: 12px; }
+table.workers { width: 100%; margin-top: 6px; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.workers td, table.workers th { padding: 3px 12px 3px 0; }
+.loadtest-scroll { overflow-x: auto; }
+
 .preview { margin: 14px 0 0; max-height: 420px; overflow: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
 
 @media (max-width: 720px) {
