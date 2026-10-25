@@ -25,6 +25,10 @@ spec:
         checksum/jmx-config: {{ include (print $.Template.BasePath "/kafka-jmx-configmap.yaml") . | sha256sum }}
       {{- end }}
     spec:
+      # EBS volumes are root-owned; the kubelet gives this group write access
+      # (kind's local-path volumes are world-writable and hide the need)
+      securityContext:
+        fsGroup: 1000   # apache/kafka runs as appuser (1000:1000)
       {{- if $jmx }}
       # The Kafka image has no JMX exporter; fetch the agent into a shared volume
       initContainers:
@@ -69,7 +73,9 @@ spec:
               listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
               controller.listener.names=CONTROLLER
               inter.broker.listener.name=PLAINTEXT
-              log.dirs=/var/lib/kafka/data
+              # A subdirectory: an ext4 volume's lost+found at the root makes Kafka
+              # refuse to start ("not in the form of topic-partition")
+              log.dirs=/var/lib/kafka/data/logs
               auto.create.topics.enable={{ .Values.kafka.config.autoCreateTopics }}
               num.partitions={{ .Values.kafka.config.numPartitions }}
               default.replication.factor={{ .Values.kafka.config.defaultReplicationFactor }}
@@ -82,7 +88,7 @@ spec:
               EOF
 
               # Format storage if not already done
-              if [ ! -f /var/lib/kafka/data/meta.properties ]; then
+              if [ ! -f /var/lib/kafka/data/logs/meta.properties ]; then
                 /opt/kafka/bin/kafka-storage.sh format -t MkU3OEVBNTcwNTJENDM2Qk -c /opt/kafka/config/kraft/server.properties --ignore-formatted
               fi
 
@@ -90,7 +96,7 @@ spec:
               exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/server.properties
           env:
             - name: KAFKA_HEAP_OPTS
-              value: "-Xmx512M -Xms512M"
+              value: "-Xmx{{ int .Values.kafka.heapMB }}M -Xms{{ int .Values.kafka.heapMB }}M"
             {{- if $jmx }}
             - name: KAFKA_OPTS
               value: "-javaagent:/jmx/jmx_prometheus_javaagent.jar={{ .Values.kafka.metrics.jmx.port }}:/etc/jmx/config.yaml"

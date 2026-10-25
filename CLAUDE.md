@@ -80,6 +80,7 @@ Full reference: `docs/observability.md`.
 - Every S3 consumer takes its env from the `telemetry-lake.s3Env` helper; don't copy S3 settings into a template.
 - `telemetry-lake.checkBudgets` fails the render when a memory budget doesn't fit its container.
 - `duckdbShell` is the ad hoc CLI pod, not the appender's DuckDB.
+- kind's volumes are world-writable host directories, while EBS volumes are root-owned ext4 with `lost+found`. Any pod writing a PVC needs an `fsGroup`, and a data dir must not be the volume root: Kafka refuses to start on `lost+found`. Check volume changes with the Docker rehearsal described in docs/eks.md, not only on kind.
 
 ## Configuration
 

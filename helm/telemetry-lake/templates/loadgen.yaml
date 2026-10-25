@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: loadgen
-          image: "{{ $lg.image.repository }}:{{ $lg.image.tag }}"
+          image: {{ include "telemetry-lake.image" (dict "root" . "image" $lg.image) | quote }}
           imagePullPolicy: {{ $lg.image.pullPolicy }}
           env:
             {{- include "telemetry-lake.loadgenEnv" . | nindent 12 }}
@@ -97,7 +97,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: "{{ $lg.image.repository }}:{{ $lg.image.tag }}"
+          image: {{ include "telemetry-lake.image" (dict "root" . "image" $lg.image) | quote }}
           imagePullPolicy: {{ $lg.image.pullPolicy }}
           args: ["--worker"]
           env:

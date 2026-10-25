@@ -346,6 +346,9 @@ helm install telemetry-lake helm/telemetry-lake -f helm/telemetry-lake/values-ek
 | `nessie.versionStore` | `inMemory` (tables forgotten on restart) | `rocksdb` on a PVC |
 | `storageClass` | the cluster default | `gp3` |
 | `duckdbShell.enabled` | `true` | `false` |
+| `images.registry` / `images.tag` | empty (images loaded into the cluster) | ECR registry and one tag for all six images (required) |
+| `createNamespace` | `true` | `false` (the namespace is created first, to hold the S3 Secret) |
+| `kafka.heapMB` | 512 | 2048 |
 
 `duckdbShell` is the ad hoc DuckDB command-line pod. It is not the appender's DuckDB, which is built into the appender image and configured by `appender.duckdb.*`.
 

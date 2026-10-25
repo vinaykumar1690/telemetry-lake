@@ -1,16 +1,25 @@
 # AWS EKS profile: S3 instead of MinIO, gp3 volumes, a persistent Nessie
-# catalog and larger memory budgets (docs/eks.md walks through the install).
+# catalog and larger memory budgets. docs/eks.md walks through the install:
 #
 #   kubectl create namespace telemetry-lake
 #   kubectl create secret generic telemetry-lake-s3 -n telemetry-lake \
 #     --from-literal=access-key=AKIA... --from-literal=secret-key=...
 #   helm install telemetry-lake helm/telemetry-lake -f helm/telemetry-lake/values-eks.yaml \
+#     --set images.registry=<account>.dkr.ecr.<region>.amazonaws.com --set images.tag=<tag> \
 #     --set s3.bucket=<bucket> --set s3.region=<region> \
 #     --set s3.endpoint=https://s3.<region>.amazonaws.com \
-#     --set observability.grafana.adminPassword=<password> \
-#     --set <component>.image.repository=<account>.dkr.ecr.<region>.amazonaws.com/telemetry-lake/<component> ...
+#     --set observability.grafana.adminPassword=<password>
 #
-# Nodes: about 4 vCPU and 16 GiB each, three of them for these budgets.
+# Nodes: these budgets request about 10 vCPU and 16 GiB with the load
+# generator idle; three m6i.2xlarge (8 vCPU, 32 GiB) leave room for compaction,
+# autoscaling and load tests.
+
+# The namespace is created beforehand, to hold the S3 Secret
+createNamespace: false
+
+images:
+  registry: ""   # required: --set images.registry=<account>.dkr.ecr.<region>.amazonaws.com
+  tag: ""        # one tag for every image, e.g. the git describe of the build
 
 storageClass: gp3   # create it first (docs/eks.md); EKS marks no class as default
 
@@ -40,6 +49,7 @@ nessie:
 
 kafka:
   storage: 100Gi
+  heapMB: 2048
   config:
     logRetentionHours: 24   # how long the appender may be down without losing data
   resources:
@@ -52,6 +62,10 @@ kafka:
 
 ingester:
   replicas: 2
+  # service:
+  #   type: LoadBalancer   # for agents outside the cluster
+  #   annotations:
+  #     service.beta.kubernetes.io/aws-load-balancer-scheme: internal
   httpThreads: 4
   resources:
     requests:
@@ -100,7 +114,7 @@ query:
 
 loadgen:
   workers:
-    replicas: 2
+    replicas: 0   # scale up for a load test; idle workers would hold their CPU requests
 
 observability:
   grafana:

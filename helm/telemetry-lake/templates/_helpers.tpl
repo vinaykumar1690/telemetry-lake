@@ -204,3 +204,21 @@ needs about 512 MiB beyond DuckDB's limit while it catches up a backlog
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+One of this repository's images: <images.registry>/<repository>:<tag> when a
+registry is set (ECR on AWS), else <repository>:<tag> as built locally. The tag
+is images.tag when set, else the component's.
+Usage: include "telemetry-lake.image" (dict "root" . "image" .Values.appender.image)
+*/}}
+{{- define "telemetry-lake.image" -}}
+{{- $root := .root -}}
+{{- $tag := $root.Values.images.tag | default .image.tag -}}
+{{- if $root.Values.images.registry -}}
+{{- printf "%s/%s:%s" (trimSuffix "/" $root.Values.images.registry) .image.repository $tag -}}
+{{- else if not $root.Values.minio.enabled -}}
+{{- fail "images.registry is required outside a local deployment: push the images to ECR and set images.registry (docs/eks.md)" -}}
+{{- else -}}
+{{- printf "%s:%s" .image.repository $tag -}}
+{{- end -}}
+{{- end }}

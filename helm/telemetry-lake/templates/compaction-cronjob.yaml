@@ -28,7 +28,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: compaction
-              image: "{{ .Values.compaction.image.repository }}:{{ .Values.compaction.image.tag }}"
+              image: {{ include "telemetry-lake.image" (dict "root" . "image" .Values.compaction.image) | quote }}
               imagePullPolicy: {{ .Values.compaction.image.pullPolicy }}
               env:
                 # Same catalog, tables and storage as the appender

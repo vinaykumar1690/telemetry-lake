@@ -23,7 +23,7 @@ spec:
     spec:
       {{- if eq .Values.nessie.versionStore "rocksdb" }}
       securityContext:
-        fsGroup: 185  # the image's nessie user
+        fsGroup: 10001  # the image's nessie group (uid 10000, gid 10001); the kubelet grants it the volume
       {{- end }}
       containers:
         - name: nessie
@@ -45,10 +45,10 @@ spec:
             # S3: the in-chart MinIO or AWS (helpers in _helpers.tpl)
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_REGION
               value: {{ .Values.s3.region | quote }}
-            {{- if .Values.minio.enabled }}
+            # Always the same endpoint as every other S3 consumer (a VPC
+            # endpoint or S3-compatible store must not be bypassed)
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_ENDPOINT
               value: {{ include "telemetry-lake.s3Endpoint" . | quote }}
-            {{- end }}
             - name: NESSIE_CATALOG_SERVICE_S3_DEFAULT-OPTIONS_PATH-STYLE_ACCESS
               value: {{ eq (include "telemetry-lake.s3UrlStyle" .) "path" | quote }}
             # S3 credentials via Nessie secret reference

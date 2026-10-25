@@ -26,7 +26,7 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.appender.terminationGracePeriodSeconds }}
       containers:
         - name: appender
-          image: "{{ .Values.appender.image.repository }}:{{ .Values.appender.image.tag }}"
+          image: {{ include "telemetry-lake.image" (dict "root" . "image" .Values.appender.image) | quote }}
           imagePullPolicy: {{ .Values.appender.image.pullPolicy }}
           env:
             # Kafka configuration

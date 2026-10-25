@@ -6,7 +6,7 @@ The chart has two profiles:
 
 This page sets up EKS for the second.
 
-> **Status:** the EKS profile has been rendered and linted, and its pieces were exercised on kind: the shared S3 settings, RocksDB Nessie and the budget guards. It has **not been run on AWS yet.**
+> **Status:** it has **not been run on AWS yet**. What has been checked locally is under [What the local rehearsal proved](#what-the-local-rehearsal-proved).
 
 ## 0. Prerequisites
 
@@ -22,7 +22,14 @@ export BUCKET=telemetry-lake-$ACCOUNT
 
 ## 1. Cluster
 
-The appender image is built for amd64, so use x86 nodes (not Graviton). Don't use Fargate either, because the OTel Collector reads `/var/log/pods` from the host. The EKS profile's budgets fit three nodes with 4 vCPU and 16 GiB each.
+The appender image is built for amd64, so use x86 nodes (not Graviton). Don't use Fargate either, because the OTel Collector reads `/var/log/pods` from the host.
+
+**Sizing.** With the load generator idle, the profile requests about 10 vCPU and 16 GiB. Compaction adds 1 vCPU and 2 GiB while it runs, and the system pods (CNI, CoreDNS, EBS CSI, kube-proxy, metrics-server) add about 1 vCPU.
+
+| Nodes | Allocatable (approx.) | Fits |
+|---|---|---|
+| 3× m6i.xlarge (4 vCPU, 16 GiB) | 11.7 vCPU, 44 GiB | No: Pending pods once compaction or autoscaling starts |
+| **3× m6i.2xlarge (8 vCPU, 32 GiB)** | 23.5 vCPU, 90 GiB | Yes, with room for load-test workers and autoscaling |
 
 `eks.yaml`:
 ```yaml
@@ -45,7 +52,7 @@ addons:
   - name: metrics-server       # the query and worker autoscalers
 managedNodeGroups:
   - name: default
-    instanceType: m6i.xlarge
+    instanceType: m6i.2xlarge
     minSize: 3
     desiredCapacity: 3
     maxSize: 6
@@ -94,11 +101,7 @@ kubectl create secret generic telemetry-lake-s3 -n telemetry-lake \
 
 Every S3 consumer reads these keys through `secretKeyRef`: Nessie, the appender, query, the query workers, compaction and nessie-gc. External Secrets can sync the Secret from AWS Secrets Manager instead of `kubectl create`. The chart only needs a Secret named `s3.existingSecret` with the keys `access-key` and `secret-key`.
 
-The chart creates the `telemetry-lake` namespace itself. If you created it above for the Secret, let Helm adopt it:
-```bash
-kubectl label namespace telemetry-lake app.kubernetes.io/managed-by=Helm
-kubectl annotate namespace telemetry-lake meta.helm.sh/release-name=telemetry-lake meta.helm.sh/release-namespace=default
-```
+The profile sets `createNamespace: false`, so the chart uses the namespace created here instead of creating its own.
 
 ## 3. Images in ECR
 
@@ -119,18 +122,17 @@ MinIO isn't deployed on AWS, so its image isn't needed.
 ## 4. Install
 
 ```bash
-images=""
-for c in ingester appender query ui compaction loadgen; do
-  images="$images --set $c.image.repository=$REGISTRY/telemetry-lake/$c --set $c.image.tag=$TAG"
-done
 helm install telemetry-lake helm/telemetry-lake -f helm/telemetry-lake/values-eks.yaml \
+  --set images.registry=$REGISTRY --set images.tag=$TAG \
   --set s3.bucket=$BUCKET --set s3.region=$AWS_REGION \
   --set s3.endpoint=https://s3.$AWS_REGION.amazonaws.com \
-  --set observability.grafana.adminPassword=$(openssl rand -hex 16) $images
+  --set observability.grafana.adminPassword=$(openssl rand -hex 16)
 ```
 
+`images.registry` prefixes all six of this repository's images (`<registry>/telemetry-lake/<name>:<images.tag>`). The third-party images come from Docker Hub, ghcr.io and Maven Central (the Kafka JMX agent), so the nodes need NAT egress.
+
 The chart refuses to render with a clear message in these cases:
-- `s3.bucket`, `s3.endpoint`, the S3 Secret or the Grafana password is missing;
+- `images.registry`, `s3.bucket`, `s3.endpoint`, the S3 Secret or the Grafana password is missing;
 - a memory budget doesn't fit its container: the appender's DuckDB limit plus 512 MiB must fit its pod, and the query service's and workers' DataFusion limits must fit theirs.
 
 ## 5. Check
@@ -147,8 +149,23 @@ Nessie keeps its catalog on the `nessie-data` volume. After `kubectl delete pod 
 ## Exposure
 
 The UI, Grafana and the ingester are ClusterIP Services.
-- **Agents outside the cluster** should send to an **internal** load balancer: `--set ingester.service.type=LoadBalancer`, then annotate the Service with `service.beta.kubernetes.io/aws-load-balancer-scheme: internal`.
+- **Agents outside the cluster** should send to an **internal** load balancer. Set `ingester.service.type: LoadBalancer` and `ingester.service.annotations: {service.beta.kubernetes.io/aws-load-balancer-scheme: internal}`; there is a commented example in `values-eks.yaml`.
 - **The UI and Grafana** stay behind port-forward or an authenticated ingress. The UI has no authentication of its own, and it can start load tests.
+
+## What the local rehearsal proved
+
+Two checks ran locally, because kind hides how EBS volumes behave. Kind's volumes are world-writable host directories; EBS volumes are root-owned ext4 with a `lost+found` directory.
+
+1. **Volumes like EBS** (Docker, a root-owned volume with `lost+found`, given the kubelet's `fsGroup` treatment):
+   - **Kafka** without `fsGroup` fails: it can't write `meta.properties`.
+   - **Kafka** with `fsGroup` but its log dir at the volume root fails fatally: `Found directory …/lost+found, 'lost+found' is not in the form of topic-partition`.
+   - With the chart's settings (`fsGroup: 1000`, `log.dirs=…/data/logs`) it starts and creates topics.
+   - **Nessie on RocksDB** starts with the chart's `fsGroup`.
+2. **The EKS profile on kind:** `values-eks.yaml` plus kind-only overrides (storage class, budgets cut to fit 8 GiB, images from the node). A stand-alone MinIO in another namespace stood in for S3, and the namespace and S3 Secret were created first, as above.
+   - This found that Nessie ignored `s3.endpoint` without MinIO and went straight to AWS (403). It now always uses the same endpoint as the other services.
+   - A 20k records/s load run then committed exactly once (rows = distinct keys = records sent), and the catalog survived deleting the Nessie pod.
+
+Not covered locally: the real AWS endpoint, IAM permissions, gp3 provisioning, NLBs and node sizing.
 
 ## Still open
 

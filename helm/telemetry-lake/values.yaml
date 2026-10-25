@@ -8,6 +8,18 @@ namespace: telemetry-lake
 # StorageClass for every volume; empty uses the cluster's default
 storageClass: ""
 
+# Create the namespace (set false when it exists already, e.g. to hold the S3
+# Secret before installing)
+createNamespace: true
+
+# This repository's images (ingester, appender, query, ui, compaction, loadgen).
+# registry: prefix for every repository below, e.g.
+# <account>.dkr.ecr.<region>.amazonaws.com; required without MinIO.
+# tag: overrides every component's tag (one build, one tag)
+images:
+  registry: ""
+  tag: ""
+
 # Object storage for the lake, shared by Nessie, the appender, query, query
 # workers, compaction and nessie-gc
 s3:
@@ -28,6 +40,7 @@ kafka:
   image: apache/kafka:3.7.0
   replicas: 1
   storage: 2Gi
+  heapMB: 512   # JVM heap; keep well under resources.limits.memory
   # Kafka broker configuration
   config:
     # Auto-create topics when producers/consumers connect
@@ -85,7 +98,7 @@ minio:
 
 # Nessie Configuration
 nessie:
-  image: ghcr.io/projectnessie/nessie:latest
+  image: ghcr.io/projectnessie/nessie:0.109.0
   warehouse: telemetrylake
   # inMemory forgets every table when the pod restarts (fine on a laptop);
   # rocksdb keeps the catalog on a volume (one replica)
@@ -128,6 +141,9 @@ ingester:
   service:
     type: ClusterIP
     port: 4318
+    # e.g. an internal AWS NLB for agents outside the cluster (with type: LoadBalancer):
+    #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    annotations: {}
   # Kafka producer settings
   kafka:
     # Broker address - uses Kafka service from this chart
@@ -289,6 +305,7 @@ ui:
   service:
     type: ClusterIP
     port: 80
+    annotations: {}   # the UI has no authentication: keep it internal
   # Override to point at services outside this release
   # (fully qualified host names; nginx does not apply DNS search domains)
   queryUpstream: ""   # Defaults to http://query.<namespace>.svc.cluster.local:<query.service.port>
@@ -360,7 +377,7 @@ compaction:
 # Nessie GC: deletes files no longer referenced (e.g. replaced by compaction)
 nessieGc:
   enabled: true
-  image: ghcr.io/projectnessie/nessie-gc:latest
+  image: ghcr.io/projectnessie/nessie-gc:0.109.0   # same release as nessie.image
   schedule: "43 3 * * *"     # daily
   cutoff: "PT24H"            # history kept for Nessie time travel
   maxFileAgeMinutes: 60      # never delete files younger than this (in-flight commits)

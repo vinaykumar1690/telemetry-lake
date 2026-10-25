@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: ingester
-          image: "{{ .Values.ingester.image.repository }}:{{ .Values.ingester.image.tag }}"
+          image: {{ include "telemetry-lake.image" (dict "root" . "image" .Values.ingester.image) | quote }}
           imagePullPolicy: {{ .Values.ingester.image.pullPolicy }}
           ports:
             - name: http

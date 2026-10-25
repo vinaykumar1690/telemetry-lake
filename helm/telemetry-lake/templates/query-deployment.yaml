@@ -24,7 +24,7 @@ spec:
       terminationGracePeriodSeconds: {{ add .Values.query.timeoutSeconds 10 }}
       containers:
         - name: query
-          image: "{{ .Values.query.image.repository }}:{{ .Values.query.image.tag }}"
+          image: {{ include "telemetry-lake.image" (dict "root" . "image" .Values.query.image) | quote }}
           imagePullPolicy: {{ .Values.query.image.pullPolicy }}
           env:
             # Same catalog and table as the appender writes
