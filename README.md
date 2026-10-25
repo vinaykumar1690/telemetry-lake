@@ -235,7 +235,14 @@ Data files stay in the MinIO bucket; see [Cleaning up](docs/integration-testing.
 
 ### Kubernetes
 
-The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys the ingester, the appender, the query service and its distributed query workers (each with a CPU autoscaler), the UI, the compaction and Nessie GC CronJobs, Kafka, MinIO, Nessie and a DuckDB pod, for example on Docker Desktop's Kubernetes; see [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
+The Helm chart in [helm/telemetry-lake](helm/telemetry-lake) deploys, for example on Docker Desktop's Kubernetes:
+- the ingester and the appender;
+- the query service and its distributed query workers, each with a CPU autoscaler;
+- the UI and the load generator;
+- the compaction and Nessie GC CronJobs;
+- Kafka, MinIO, Nessie and a DuckDB pod.
+
+See [docs/telemetry-lake-helm-README.md](docs/telemetry-lake-helm-README.md). Build the service images from the repository root:
 
 ```bash
 docker build -f docker/ingester/Dockerfile -t telemetry-lake/ingester:latest .
@@ -243,10 +250,11 @@ docker build -f docker/appender/Dockerfile -t telemetry-lake/appender:latest .
 docker build -f docker/query/Dockerfile -t telemetry-lake/query:latest .
 docker build -f docker/compaction/Dockerfile -t telemetry-lake/compaction:latest .
 docker build -f docker/ui/Dockerfile -t telemetry-lake/ui:latest .
+docker build -f docker/loadgen/Dockerfile -t telemetry-lake/loadgen:latest .
 docker build -f docker/minio/Dockerfile -t telemetry-lake/minio:latest .   # MinIO publishes no community images any more
 ```
 
-Open the UI from your laptop with `kubectl port-forward -n telemetry-lake svc/ui 8080:80` and http://localhost:8080.
+Open the UI from your laptop with `kubectl port-forward -n telemetry-lake svc/ui 8080:80` and http://localhost:8080. Its **Load test** tab drives `otel-loadgen`, which sends a sustained rate straight to the ingester ([docs/load-testing.md](docs/load-testing.md)).
 
 ## Configuration
 
@@ -327,6 +335,9 @@ Also cap the request body at your ingress (for example nginx `client_max_body_si
 | `LOG_FORMAT` / `LOG_LEVEL` | text on a terminal, else `json` / `info` | Log output |
 | `APPENDER_ID` | hostname | Recorded with each offsets row |
 | `DUCKDB_HOME_DIRECTORY` | `/tmp` | Where DuckDB installs its extensions (must be writable) |
+| `DUCKDB_MEMORY_LIMIT_MB` / `DUCKDB_THREADS` | DuckDB's defaults (80 % of detected memory, one thread per detected core) | Set both to fit the container: DuckDB may detect the node's cores. Keep the limit above `MAX_STAGED_MB` |
+| `KAFKA_QUEUED_MAX_KBYTES` | `16384` | librdkafka prefetch per partition (`queued.max.messages.kbytes`) |
+| `DUCKDB_TEMP_DIRECTORY` | `<DUCKDB_HOME_DIRECTORY>/duckdb_tmp` | Where DuckDB spills when staged rows or a commit outgrow its memory (must be writable; Helm mounts an emptyDir) |
 
 The appender needs DuckDB 1.5.4 or newer. Delivery into Iceberg is exactly-once: each commit writes the log rows and their Kafka offsets to the offsets table in one atomic Iceberg transaction, and recovery resumes from that table. See [docs/design.md](docs/design.md).
 

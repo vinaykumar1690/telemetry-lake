@@ -1,0 +1,140 @@
+{{- if .Values.loadgen.enabled }}
+{{- $lg := .Values.loadgen }}
+{{- $workers := gt (int $lg.workers.replicas) 0 }}
+# Load generator (otel-loadgen, docs/load-testing.md). The UI's Load test tab
+# drives the controller through nginx's /api/loadgen/. With workers.replicas
+# 0 the controller sends the load itself; otherwise it splits the rate across
+# the worker pods it finds through the headless Service, and rebalances when
+# that Deployment is scaled. The load goes straight to the ingester Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: loadgen
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: 1   # the run lives in the controller's memory
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" $lg.port) | nindent 8 }}
+    spec:
+      containers:
+        - name: loadgen
+          image: "{{ $lg.image.repository }}:{{ $lg.image.tag }}"
+          imagePullPolicy: {{ $lg.image.pullPolicy }}
+          env:
+            {{- include "telemetry-lake.loadgenEnv" . | nindent 12 }}
+            {{- if $workers }}
+            - name: WORKERS_DNS
+              value: {{ printf "loadgen-workers.%s.svc.cluster.local" .Values.namespace | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $lg.port }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml $lg.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loadgen
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: loadgen
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $lg.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: loadgen
+{{- if $workers }}
+---
+# Workers (otel-loadgen --worker): each sends the share the controller
+# assigns it, and stops on its own if the controller goes quiet for 15 s
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen-workers
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: loadgen-workers
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $lg.workers.replicas }}
+  selector:
+    matchLabels:
+      app: loadgen-workers
+  template:
+    metadata:
+      labels:
+        app: loadgen-workers
+        {{- include "telemetry-lake.labels" . | nindent 8 }}
+      annotations:
+        {{- include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" $lg.port) | nindent 8 }}
+    spec:
+      containers:
+        - name: worker
+          image: "{{ $lg.image.repository }}:{{ $lg.image.tag }}"
+          imagePullPolicy: {{ $lg.image.pullPolicy }}
+          args: ["--worker"]
+          env:
+            {{- include "telemetry-lake.loadgenEnv" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ $lg.port }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml $lg.workers.resources | nindent 12 }}
+---
+# Headless: DNS returns every ready worker's address
+apiVersion: v1
+kind: Service
+metadata:
+  name: loadgen-workers
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: loadgen-workers
+    {{- include "telemetry-lake.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ $lg.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: loadgen-workers
+{{- end }}
+{{- end }}

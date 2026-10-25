@@ -22,8 +22,11 @@ ctest --output-on-failure
 # Query service (Rust, separate Cargo workspace)
 cd query && cargo build && cargo test --workspace
 
-# UI (React + TS + Vite; npm run dev proxies /api to localhost:8090 and :4318)
+# UI (React + TS + Vite; npm run dev proxies /api to localhost:8090, :4318 and :8095)
 cd ui && npm ci && npm test && npm run build
+
+# Load generator (Rust, its own crate; the ignored test prints MB/s per core)
+cd loadgen && cargo test && cargo test --release -- --ignored --nocapture throughput
 ```
 
 Tests against a live catalog/Kafka are opt-in (`ICEBERG_IT=1`, `E2E=1`, `QUERY_IT=1`, `COMPACTION_IT=1`); the local stack (`tests/it/stack.sh up`) and prerequisites are in docs/integration-testing.md.
@@ -42,7 +45,8 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 - Ingester wraps raw payloads in `RawTelemetryMessage` (proto/telemetry_wrapper.proto) without parsing; parsing happens in the appender
 - Appender exactly-once: each Iceberg commit inserts the log rows *and* their Kafka offsets into `_appender_offsets` in one DuckDB transaction (sent as a single REST `transactions/commit`). Recovery reads that table; Kafka consumer-group offsets are only hints for lag monitoring
 - Revoked partitions are fenced: the revoke callback waits for any in-flight commit covering them (or exits) before returning
-- Nothing is skipped: undecodable messages go to a Kafka DLQ topic before their offset advances; full pipelines pause partitions
+- Nothing is skipped: undecodable messages go to a Kafka DLQ topic before their offset advances; full pipelines pause partitions. librdkafka keeps a partition's pause flag across revoke and reassignment, so `onRevoked` resumes the partitions it had paused while it still owns them. Never resume a partition that is not paused: the image's librdkafka (2.3, Ubuntu 24.04) then restarts its fetch from an earlier position and duplicates messages (fixed in 2.4)
+- Appender memory: DuckDB sizes itself from what it detects (often the node's memory and cores) and spills to `temp_directory`, which must be writable; the chart sets `DUCKDB_MEMORY_LIMIT_MB`, `DUCKDB_THREADS`, `DUCKDB_TEMP_DIRECTORY` (emptyDir), `KAFKA_QUEUED_MAX_KBYTES` and `MALLOC_ARENA_MAX` to fit the pod
 - Appender DuckDB sessions run in UTC: Iceberg partition transforms of timestamptz are UTC, DuckDB otherwise uses the machine's zone
 - Compaction/maintenance is a separate Spark job (`compaction/compact.py`, docker/compaction, Helm CronJob); on Nessie (gc.enabled=false) files are reclaimed by the nessie-gc CronJob. Never set `write.target-file-size-bytes` on the logs table: DuckDB refuses to append to partitioned tables that set it
 - `PROMOTED_ATTRIBUTES` adds VARCHAR columns after the base ones (`schema::TableSchema`); the query service resolves `k8s.pod.name` to `k8s_pod_name` by its `.`→`_` rule, so names must stay in sync
@@ -53,7 +57,12 @@ OTel Agents → Ingester (HTTP :4318) → Kafka → Appender → Iceberg (S3/Min
 - `otel_receiver` (src/main.cpp + src/ingester/): Crow HTTP server that accepts OTLP logs and produces to Kafka
 - `otel_appender` (src/appender/): `KafkaSource` (poll thread) → `PipelinePool` (decode/transform/stage) → `StagingRegistry` → `IcebergCommitter` → `DuckdbIcebergSink`; wired in `app.cpp`
 - `otel-query` (query/, Rust): `logquery` (IR, JSON frontend, cursors; no engine dependency) → `planner` (`FieldResolver` field namespace, IR → DataFusion exprs, paginated search) → `logscan` (`LogsTableProvider`/`LogsScanExec`: partitioned Iceberg scan, `LogsScanCodec` for workers) → `query-server` (axum API, `IcebergSource` table cache, read-only SQL, `distributed.rs`: datafusion-distributed handlers, `--worker` mode). DataFusion 55 with iceberg-rust and apache/datafusion-iceberg pinned by git revision (no release supports DF 55 yet); plain EXPLAIN hides distribution, use EXPLAIN ANALYZE. Every frontend must lower to the IR and resolve fields through `FieldResolver`; this keeps adding LogQL a two-way door (docs/query-design.md §3)
-- `ui/` (React, Vite): Search tab (`/v1/search`; facets and histogram via `/v1/sql`) and Generate tab (OTLP/JSON built in the browser, POSTed to the ingester). nginx (`ui/nginx.conf.template`) serves it and proxies `/api/query/` and `/api/ingest/`, resolving upstreams per request, so they must be fully qualified names. Pure logic (`buildRequest.ts`, `facets.ts`, `generate.ts`, `send.ts`) is unit-tested with Vitest
+- `otel-loadgen` (loadgen/, Rust): sustained OTLP load for the UI's Load test tab (docs/load-testing.md).
+  - Protobuf and JSON are written straight to bytes (`generate.rs`), with the Generate tab's message templates; keep the two in sync.
+  - Rate loops are open-model (`node.rs`): a tick with no free in-flight slot counts as "behind" and is never queued.
+  - The controller (`controller.rs`) splits the rate across `--worker` pods found through a headless Service, or sends the load itself without workers.
+  - `INGEST_URL` comes only from the environment, never from a request.
+- `ui/` (React, Vite): Search tab (`/v1/search`; facets and histogram via `/v1/sql`), Generate tab (OTLP/JSON built in the browser, POSTed to the ingester) and Load test tab (drives otel-loadgen through `/api/loadgen/`). nginx (`ui/nginx.conf.template`) serves it and proxies `/api/query/` and `/api/ingest/`, resolving upstreams per request, so they must be fully qualified names. Pure logic (`buildRequest.ts`, `facets.ts`, `generate.ts`, `send.ts`) is unit-tested with Vitest
 - Libraries: `observability` (src/observability/: structured logger, prometheus-cpp registry, librdkafka statistics → `rdkafka_*`), `appender_core` (DuckDB-free, tested with fakes) and `appender_duckdb`
 
 ## Observability

@@ -104,6 +104,24 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # DuckDB spills here when staging or a commit outgrows its memory
+            - name: DUCKDB_TEMP_DIRECTORY
+              value: /var/tmp/duckdb
+            # Sized to the pod: DuckDB otherwise takes 80 % of the memory and
+            # one thread per core it detects
+            - name: DUCKDB_MEMORY_LIMIT_MB
+              value: {{ .Values.appender.duckdb.memoryLimitMB | quote }}
+            - name: DUCKDB_THREADS
+              value: {{ .Values.appender.duckdb.threads | quote }}
+            - name: KAFKA_QUEUED_MAX_KBYTES
+              value: {{ .Values.appender.kafka.queuedMaxKBytes | quote }}
+            # glibc otherwise keeps up to 8 malloc arenas per core, holding freed
+            # memory that DuckDB's limit does not see
+            - name: MALLOC_ARENA_MAX
+              value: "2"
+          volumeMounts:
+            - name: duckdb-tmp
+              mountPath: /var/tmp/duckdb
           ports:
             - name: health
               containerPort: {{ .Values.appender.healthPort }}
@@ -121,4 +139,8 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.appender.resources | nindent 12 }}
+      volumes:
+        - name: duckdb-tmp
+          emptyDir:
+            sizeLimit: {{ .Values.appender.duckdbTempSizeLimit }}
 {{- end }}

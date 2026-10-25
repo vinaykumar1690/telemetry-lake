@@ -156,6 +156,8 @@ appender:
     topic: "telemetry-logs"
     consumerGroup: "otel-appender"
     dlqTopic: ""  # Defaults to <topic>-dlq (auto-created when autoCreateTopics is on)
+    # librdkafka prefetch per partition (its default, 64 MiB, overruns a 1 GiB pod)
+    queuedMaxKBytes: 16384
   # Iceberg catalog settings
   iceberg:
     # Catalog URI - uses Nessie's Iceberg REST endpoint from this chart
@@ -188,6 +190,14 @@ appender:
   promotedAttributes: ""
   terminationGracePeriodSeconds: 120
   healthPort: 8080   # also serves /metrics
+  # emptyDir DuckDB spills to when staged rows or a commit outgrow its memory
+  duckdbTempSizeLimit: 4Gi
+  # DuckDB's memory limit and threads. Keep memoryLimitMB above
+  # buffer.maxStagedMB and, with the Kafka prefetch (partitions ×
+  # kafka.queuedMaxKBytes) and the pipeline queues, under resources.limits.memory
+  duckdb:
+    memoryLimitMB: 512
+    threads: 2
   # librdkafka statistics: rdkafka_* metrics and the commit lag; 0 disables them
   kafkaStatsIntervalMs: 15000
   resources:
@@ -195,7 +205,7 @@ appender:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "1Gi"
+      memory: "1536Mi"  # DuckDB (duckdb.memoryLimitMB) plus ~500 MiB outside it while catching up
       cpu: "1000m"
 
 # Log query service (otel-query): JSON search and read-only SQL over the logs table
@@ -273,6 +283,41 @@ ui:
     limits:
       memory: "128Mi"
       cpu: "500m"
+
+# Load generator (otel-loadgen): sustained OTLP load against the ingester,
+# configured and watched from the UI's Load test tab (docs/load-testing.md)
+loadgen:
+  enabled: true
+  image:
+    repository: telemetry-lake/loadgen
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 8095
+  ingestUrl: ""            # Defaults to http://ingester.<namespace>.svc.cluster.local:<ingester.service.port>
+  # Caps on what the UI may ask for
+  maxRecordsPerSecond: 2000000
+  maxInFlight: 4096
+  maxRequestBytes: ""      # Defaults to ingester.limits.maxDecompressedBytes
+  requestTimeoutSeconds: 30
+  # The controller sends the load itself while workers.replicas is 0
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "2000m"
+  # Each worker sends an even share of the rate; add workers when the
+  # Load test tab shows "behind" with requests to spare in flight
+  workers:
+    replicas: 0
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "1000m"
+      limits:
+        memory: "1Gi"
+        cpu: "2000m"
 
 # Iceberg table maintenance (compaction/compact.py, Spark)
 compaction:

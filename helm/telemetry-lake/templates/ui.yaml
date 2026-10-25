@@ -31,6 +31,10 @@ spec:
               value: {{ .Values.ui.queryUpstream | default (printf "http://query.%s.svc.cluster.local:%v" .Values.namespace .Values.query.service.port) | quote }}
             - name: INGEST_UPSTREAM
               value: {{ .Values.ui.ingestUpstream | default (printf "http://ingester.%s.svc.cluster.local:%v" .Values.namespace .Values.ingester.service.port) | quote }}
+            # Always set: nginx fails to start on an undefined variable. With
+            # loadgen disabled the Load test tab reports it unreachable.
+            - name: LOADGEN_UPSTREAM
+              value: {{ printf "http://loadgen.%s.svc.cluster.local:%v" .Values.namespace .Values.loadgen.port | quote }}
           ports:
             - name: http
               containerPort: 8080

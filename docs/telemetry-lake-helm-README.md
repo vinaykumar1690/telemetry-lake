@@ -201,6 +201,14 @@ kubectl exec -it -n telemetry-lake duckdb-0 -- duckdb
 
 With `observability.enabled` (the default) the chart also deploys Prometheus (with alert rules), Loki, Grafana with the Appender, Ingester and Kafka dashboards, kafka-exporter, the Kafka JMX exporter agent, and an OpenTelemetry Collector DaemonSet that ships every pod's logs in the namespace to Loki. Open Grafana with `kubectl port-forward -n telemetry-lake svc/grafana 3000:3000`. Metrics, lag semantics and alerts: [observability.md](observability.md).
 
+## Load generator
+
+With `loadgen.enabled` (the default), the chart deploys `otel-loadgen`, which the UI's **Load test** tab drives. It sends a sustained rate of OTLP logs straight to the ingester Service.
+
+With `loadgen.workers.replicas: 0` the controller pod sends the load itself. Set the replica count higher to split the rate across worker pods, for example `helm upgrade ... --set loadgen.workers.replicas=4`.
+
+Caps on what a run may ask for are under `loadgen.*`. See [load-testing.md](load-testing.md).
+
 ## Service Discovery
 
 All components communicate via Kubernetes internal DNS:

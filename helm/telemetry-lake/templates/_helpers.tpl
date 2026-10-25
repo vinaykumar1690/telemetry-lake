@@ -70,6 +70,25 @@ kafka:9092
 {{- end }}
 
 {{/*
+Environment shared by the load generator's controller and workers
+*/}}
+{{- define "telemetry-lake.loadgenEnv" -}}
+{{- $lg := .Values.loadgen -}}
+- name: HTTP_PORT
+  value: {{ $lg.port | quote }}
+- name: INGEST_URL
+  value: {{ $lg.ingestUrl | default (printf "http://ingester.%s.svc.cluster.local:%v" .Values.namespace .Values.ingester.service.port) | quote }}
+- name: MAX_RECORDS_PER_SECOND
+  value: {{ $lg.maxRecordsPerSecond | int64 | quote }}
+- name: MAX_IN_FLIGHT
+  value: {{ $lg.maxInFlight | quote }}
+- name: MAX_REQUEST_BYTES
+  value: {{ $lg.maxRequestBytes | default .Values.ingester.limits.maxDecompressedBytes | int64 | quote }}
+- name: REQUEST_TIMEOUT_SECONDS
+  value: {{ $lg.requestTimeoutSeconds | quote }}
+{{- end }}
+
+{{/*
 Pod annotations that make the chart's Prometheus scrape a pod.
 Usage: include "telemetry-lake.scrapeAnnotations" (dict "root" . "port" 9464)
 */}}
